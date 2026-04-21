@@ -7,7 +7,7 @@ struct BigBroApp: App {
     @StateObject private var appModel = AppModel()
 
     var body: some Scene {
-        MenuBarExtra("BigBro", systemImage: "brain") {
+        MenuBarExtra("BigBro", image: "bigbro") {
             DeviceListView()
                 .environmentObject(appModel.pairingManager)
         }
