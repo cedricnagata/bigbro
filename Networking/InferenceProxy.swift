@@ -1,20 +1,23 @@
 import Foundation
 
 enum InferenceError: Error {
+    case invalidConfiguration
     case upstreamFailure(statusCode: Int)
     case invalidResponse
 }
 
 struct InferenceProxy {
-    static let ollamaURL = URL(string: "http://localhost:11434/api/chat")!
-    var model: String = "llama3"
+    func forward(messages: [[String: String]], model: String? = nil) async throws -> String {
+        let settings = AppSettings.shared
+        guard let url = settings.chatURL else { throw InferenceError.invalidConfiguration }
 
-    func forward(messages: [[String: String]]) async throws -> String {
-        var request = URLRequest(url: Self.ollamaURL)
+        let resolvedModel = model?.isEmpty == false ? model! : settings.defaultModel
+
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        let body: [String: Any] = ["model": model, "messages": messages, "stream": false]
+        let body: [String: Any] = ["model": resolvedModel, "messages": messages, "stream": false]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await URLSession.shared.data(for: request)

@@ -19,9 +19,9 @@ struct HTTPResponse {
         return HTTPResponse(statusCode: status, body: data, contentType: "application/json")
     }
 
-    static let notFound = HTTPResponse(statusCode: 404, body: Data("{\"error\":\"not found\"}".utf8), contentType: "application/json")
-    static let unauthorized = HTTPResponse(statusCode: 401, body: Data("{\"error\":\"unauthorized\"}".utf8), contentType: "application/json")
-    static let badRequest = HTTPResponse(statusCode: 400, body: Data("{\"error\":\"bad request\"}".utf8), contentType: "application/json")
+    nonisolated static var notFound: HTTPResponse { HTTPResponse(statusCode: 404, body: Data("{\"error\":\"not found\"}".utf8), contentType: "application/json") }
+    nonisolated static var unauthorized: HTTPResponse { HTTPResponse(statusCode: 401, body: Data("{\"error\":\"unauthorized\"}".utf8), contentType: "application/json") }
+    nonisolated static var badRequest: HTTPResponse { HTTPResponse(statusCode: 400, body: Data("{\"error\":\"bad request\"}".utf8), contentType: "application/json") }
 }
 
 protocol HTTPServerDelegate: AnyObject {
@@ -67,12 +67,20 @@ actor HTTPServer {
 
     private func handle(connection: NWConnection) async {
         connection.start(queue: .global(qos: .userInitiated))
+        print("[HTTPServer] New connection from \(connection.endpoint)")
 
-        guard let rawData = await receive(connection: connection),
-              let request = parseHTTP(rawData) else {
+        guard let rawData = await receive(connection: connection) else {
+            print("[HTTPServer] Receive returned nil data")
             connection.cancel()
             return
         }
+        guard let request = parseHTTP(rawData) else {
+            print("[HTTPServer] Failed to parse HTTP from \(rawData.count) bytes: \(String(data: rawData.prefix(200), encoding: .utf8) ?? "<binary>")")
+            connection.cancel()
+            return
+        }
+
+        print("[HTTPServer] \(request.method) \(request.path) body=\(request.body?.count ?? 0)b")
 
         let response: HTTPResponse
         if let delegate {
@@ -81,6 +89,7 @@ actor HTTPServer {
             response = .notFound
         }
 
+        print("[HTTPServer] -> \(response.statusCode) body=\(String(data: response.body, encoding: .utf8) ?? "<binary>")")
         await send(response, on: connection)
         connection.cancel()
     }

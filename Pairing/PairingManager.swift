@@ -1,10 +1,12 @@
 import Foundation
+import Combine
+import AppKit
 
 @MainActor
 final class PairingManager: ObservableObject {
-    @Published var pendingRequests: [PairingRequest] = []
     @Published var approvedDevices: [String: String] = [:]  // deviceId → token
     private var deniedDevices: Set<String> = []
+    private var pendingRequests: [PairingRequest] = []
 
     init() {
         approvedDevices = TokenStore.shared.loadAll()
@@ -15,6 +17,7 @@ final class PairingManager: ObservableObject {
               !deniedDevices.contains(request.id),
               !pendingRequests.contains(where: { $0.id == request.id }) else { return }
         pendingRequests.append(request)
+        Task { showAlert(for: request) }
     }
 
     @discardableResult
@@ -39,5 +42,22 @@ final class PairingManager: ObservableObject {
 
     func validate(token: String) -> Bool {
         approvedDevices.values.contains(token)
+    }
+
+    private func showAlert(for request: PairingRequest) {
+        let alert = NSAlert()
+        alert.messageText = "\(request.deviceName) wants to connect"
+        alert.informativeText = "Allow this device to use BigBro for AI inference?"
+        alert.addButton(withTitle: "Allow")
+        alert.addButton(withTitle: "Deny")
+        alert.alertStyle = .informational
+
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            approve(request)
+        } else {
+            deny(request)
+        }
     }
 }

@@ -34,17 +34,12 @@ struct DeviceListView: View {
                 }
             }
 
-            if !pairingManager.pendingRequests.isEmpty {
-                Divider()
-                HStack(spacing: 6) {
-                    ProgressView().scaleEffect(0.7)
-                    Text("\(pairingManager.pendingRequests.count) pending request(s)")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-            }
-
             Divider()
+
+            SettingsLink {
+                Text("Settings…")
+                    .font(.subheadline)
+            }
 
             Button("Quit BigBro") {
                 NSApplication.shared.terminate(nil)
@@ -53,12 +48,5 @@ struct DeviceListView: View {
         }
         .padding(12)
         .frame(width: 260)
-        .sheet(item: Binding(
-            get: { pairingManager.pendingRequests.first },
-            set: { _ in }
-        )) { request in
-            PairingAlertView(request: request)
-                .environmentObject(pairingManager)
-        }
     }
 }
