@@ -117,13 +117,7 @@ final class AppRouter: HTTPServerDelegate, @unchecked Sendable {
         guard isValid else { return .unauthorized }
 
         let model = json["model"] as? String
-
-        do {
-            let content = try await inferenceProxy.forward(messages: messagesRaw, model: model)
-            return .json(["content": content])
-        } catch {
-            print("[Chat] Inference error: \(error)")
-            return HTTPResponse(statusCode: 500, body: Data("{\"error\":\"inference failed\"}".utf8), contentType: "application/json")
-        }
+        let stream = inferenceProxy.forwardStream(messages: messagesRaw, model: model)
+        return .sse(stream)
     }
 }

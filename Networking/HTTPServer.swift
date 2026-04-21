@@ -13,10 +13,29 @@ struct HTTPResponse {
     let statusCode: Int
     let body: Data
     let contentType: String
+    let sseStream: AsyncThrowingStream<String, Error>?
+
+    init(statusCode: Int, body: Data, contentType: String) {
+        self.statusCode = statusCode
+        self.body = body
+        self.contentType = contentType
+        self.sseStream = nil
+    }
+
+    private init(sseStream: AsyncThrowingStream<String, Error>) {
+        self.statusCode = 200
+        self.body = Data()
+        self.contentType = "text/event-stream"
+        self.sseStream = sseStream
+    }
 
     static func json(_ object: Any, status: Int = 200) -> HTTPResponse {
         let data = (try? JSONSerialization.data(withJSONObject: object)) ?? Data()
         return HTTPResponse(statusCode: status, body: data, contentType: "application/json")
+    }
+
+    static func sse(_ stream: AsyncThrowingStream<String, Error>) -> HTTPResponse {
+        HTTPResponse(sseStream: stream)
     }
 
     nonisolated static var notFound: HTTPResponse { HTTPResponse(statusCode: 404, body: Data("{\"error\":\"not found\"}".utf8), contentType: "application/json") }
@@ -89,8 +108,13 @@ actor HTTPServer {
             response = .notFound
         }
 
-        print("[HTTPServer] -> \(response.statusCode) body=\(String(data: response.body, encoding: .utf8) ?? "<binary>")")
-        await send(response, on: connection)
+        if let stream = response.sseStream {
+            print("[HTTPServer] -> SSE stream")
+            await sendSSE(stream, on: connection)
+        } else {
+            print("[HTTPServer] -> \(response.statusCode) body=\(String(data: response.body, encoding: .utf8) ?? "<binary>")")
+            await send(response, on: connection)
+        }
         connection.cancel()
     }
 
@@ -198,6 +222,30 @@ actor HTTPServer {
 
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             connection.send(content: responseData, completion: .contentProcessed { _ in
+                continuation.resume()
+            })
+        }
+    }
+
+    private func sendSSE(_ stream: AsyncThrowingStream<String, Error>, on connection: NWConnection) async {
+        let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+        await sendRaw(Data(headers.utf8), on: connection)
+        do {
+            for try await delta in stream {
+                if let payload = try? JSONSerialization.data(withJSONObject: ["delta": delta]),
+                   let payloadStr = String(data: payload, encoding: .utf8) {
+                    await sendRaw(Data("data: \(payloadStr)\n\n".utf8), on: connection)
+                }
+            }
+        } catch {
+            print("[HTTPServer] SSE stream error: \(error)")
+        }
+        await sendRaw(Data("data: [DONE]\n\n".utf8), on: connection)
+    }
+
+    private func sendRaw(_ data: Data, on connection: NWConnection) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            connection.send(content: data, completion: .contentProcessed { _ in
                 continuation.resume()
             })
         }

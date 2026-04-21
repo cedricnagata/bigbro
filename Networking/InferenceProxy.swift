@@ -7,6 +7,40 @@ enum InferenceError: Error {
 }
 
 struct InferenceProxy {
+    func forwardStream(messages: [[String: String]], model: String? = nil) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            Task {
+                do {
+                    let settings = AppSettings.shared
+                    guard let url = settings.chatURL else {
+                        continuation.finish(throwing: InferenceError.invalidConfiguration)
+                        return
+                    }
+                    let resolvedModel = model?.isEmpty == false ? model! : settings.defaultModel
+                    var request = URLRequest(url: url)
+                    request.httpMethod = "POST"
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    let body: [String: Any] = ["model": resolvedModel, "messages": messages, "stream": true]
+                    request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                    let (bytes, _) = try await URLSession.shared.bytes(for: request)
+                    for try await line in bytes.lines {
+                        guard !line.isEmpty,
+                              let lineData = line.data(using: .utf8),
+                              let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else { continue }
+                        if let message = json["message"] as? [String: Any],
+                           let content = message["content"] as? String, !content.isEmpty {
+                            continuation.yield(content)
+                        }
+                        if let done = json["done"] as? Bool, done { break }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+
     func forward(messages: [[String: String]], model: String? = nil) async throws -> String {
         let settings = AppSettings.shared
         guard let url = settings.chatURL else { throw InferenceError.invalidConfiguration }
