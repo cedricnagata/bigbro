@@ -11,7 +11,6 @@ struct BigBroApp: App {
             DeviceListView()
                 .environmentObject(appModel.pairingManager)
         }
-        .menuBarExtraStyle(.window)
 
         Settings {
             SettingsView()

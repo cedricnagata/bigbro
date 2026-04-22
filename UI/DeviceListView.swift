@@ -2,53 +2,29 @@ import SwiftUI
 
 struct DeviceListView: View {
     @EnvironmentObject var pairingManager: PairingManager
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Image(systemName: "brain")
-                    .foregroundStyle(.blue)
-                Text("BigBro")
-                    .font(.headline)
-                Spacer()
+        if pairingManager.approvedDevices.isEmpty {
+            Text("No paired devices")
+        } else {
+            ForEach(Array(pairingManager.approvedDevices.keys), id: \.self) { deviceId in
+                Label(deviceId, systemImage: "iphone")
+                    .disabled(true)
             }
-
-            Divider()
-
-            if pairingManager.approvedDevices.isEmpty {
-                Text("No paired devices")
-                    .foregroundStyle(.secondary)
-                    .font(.subheadline)
-            } else {
-                ForEach(Array(pairingManager.approvedDevices.keys), id: \.self) { deviceId in
-                    HStack(spacing: 8) {
-                        Image(systemName: "iphone")
-                            .foregroundStyle(.secondary)
-                        Text(deviceId)
-                            .font(.subheadline)
-                            .lineLimit(1)
-                        Spacer()
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                    }
-                }
-            }
-
-            Divider()
-
-            SettingsLink {
-                Text("Settings")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-
-            Button("Quit BigBro") {
-                NSApplication.shared.terminate(nil)
-            }
-            .frame(maxWidth: .infinity)
-            .buttonStyle(.bordered)
         }
-        .padding(12)
-        .frame(width: 260)
+
+        Divider()
+
+        Button("Settings…") {
+            openSettings()
+            NSApp.activate(ignoringOtherApps: true)
+        }
+
+        Divider()
+
+        Button("Quit BigBro") {
+            NSApplication.shared.terminate(nil)
+        }
     }
 }
