@@ -113,6 +113,12 @@ private struct DeviceRow: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            if connected {
+                Button("Disconnect") {
+                    pairingManager.disconnect(deviceId: deviceId)
+                }
+                .buttonStyle(.plain)
+            }
             Button("Remove") {
                 pairingManager.remove(deviceId: deviceId)
             }

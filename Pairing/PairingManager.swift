@@ -47,6 +47,12 @@ final class PairingManager: ObservableObject {
         presenceCancels.removeValue(forKey: deviceId)
     }
 
+    /// Close the presence stream for a single device. Live clients will
+    /// reconnect within seconds; dead ones stay disconnected.
+    func disconnect(deviceId: String) {
+        presenceCancels[deviceId]?()
+    }
+
     /// Force-close every active presence stream. Live clients will reconnect
     /// within seconds; dead clients will stay disconnected in the UI.
     func refreshAll() {
@@ -55,6 +61,7 @@ final class PairingManager: ObservableObject {
     }
 
     func removeAll() {
+        for cancel in presenceCancels.values { cancel() }
         for id in approvedDevices.keys { TokenStore.shared.delete(deviceId: id) }
         approvedDevices.removeAll()
         deviceNames.removeAll()
@@ -97,6 +104,7 @@ final class PairingManager: ObservableObject {
     }
 
     func remove(deviceId: String) {
+        presenceCancels[deviceId]?()
         approvedDevices.removeValue(forKey: deviceId)
         deviceNames.removeValue(forKey: deviceId)
         connectedDeviceIds.remove(deviceId)
