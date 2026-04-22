@@ -38,30 +38,37 @@ final class PairingManager: ObservableObject {
     }
 
     private var presenceCancels: [String: @Sendable () -> Void] = [:]
+    private var presencePokes: [String: @Sendable () -> Void] = [:]
 
-    func registerPresence(deviceId: String, cancel: @escaping @Sendable () -> Void) {
+    func registerPresence(deviceId: String,
+                          cancel: @escaping @Sendable () -> Void,
+                          poke: @escaping @Sendable () -> Void) {
         presenceCancels[deviceId] = cancel
+        presencePokes[deviceId] = poke
     }
 
     func unregisterPresence(_ deviceId: String) {
         presenceCancels.removeValue(forKey: deviceId)
+        presencePokes.removeValue(forKey: deviceId)
     }
 
-    /// Close the presence stream for a single device. Live clients will
-    /// reconnect within seconds; dead ones stay disconnected.
+    /// Close the presence stream for a single device. The client (with
+    /// auto-reconnect dropped) will stay disconnected until it refreshes.
     func disconnect(deviceId: String) {
         presenceCancels[deviceId]?()
     }
 
-    /// Force-close every active presence stream. Live clients will reconnect
-    /// within seconds; dead clients will stay disconnected in the UI.
+    /// Poke every active stream with an immediate ping. Live connections stay
+    /// up; dead ones fail the TCP write and close, flipping the UI to
+    /// disconnected. Does not tear down healthy connections.
     func refreshAll() {
-        print("[PairingManager] Refresh: closing \(presenceCancels.count) presence stream(s)")
-        for cancel in presenceCancels.values { cancel() }
+        print("[PairingManager] Refresh: poking \(presencePokes.count) presence stream(s)")
+        for poke in presencePokes.values { poke() }
     }
 
     func removeAll() {
         for cancel in presenceCancels.values { cancel() }
+        presencePokes.removeAll()
         for id in approvedDevices.keys { TokenStore.shared.delete(deviceId: id) }
         approvedDevices.removeAll()
         deviceNames.removeAll()

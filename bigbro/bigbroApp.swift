@@ -76,7 +76,7 @@ final class AppRouter: HTTPServerDelegate, @unchecked Sendable {
         guard let deviceId else { return .unauthorized }
         let manager = pairingManager
         print("[Router] /presence stream opening for \(deviceId)")
-        let (response, cancel) = HTTPResponse.presence(
+        let (response, cancel, poke) = HTTPResponse.presence(
             onOpen: {
                 Task { @MainActor in manager.markConnected(deviceId) }
             },
@@ -87,7 +87,7 @@ final class AppRouter: HTTPServerDelegate, @unchecked Sendable {
                 }
             }
         )
-        await MainActor.run { manager.registerPresence(deviceId: deviceId, cancel: cancel) }
+        await MainActor.run { manager.registerPresence(deviceId: deviceId, cancel: cancel, poke: poke) }
         return response
     }
 

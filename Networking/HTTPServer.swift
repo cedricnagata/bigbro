@@ -50,12 +50,14 @@ struct HTTPResponse {
     /// every 30s; exits only when the client disconnects (or server cancels).
     /// `onOpen` fires once the HTTP headers are sent; `onClose` fires when the
     /// stream ends for any reason.
-    /// Returns a presence response and an external cancel closure. Invoking the
-    /// cancel closure finishes the stream — useful for forcing all clients to
-    /// reconnect (e.g. a manual Refresh in the UI).
+    /// Returns the response plus two closures:
+    /// - `cancel` ends the stream immediately (for explicit disconnect/remove).
+    /// - `poke` yields an immediate ping. If the underlying TCP write fails,
+    ///   `sendSSE` tears down the stream and fires `onClose`; if it succeeds,
+    ///   the client is verified alive and nothing changes. Used by Refresh.
     static func presence(onOpen: @escaping @Sendable () -> Void,
                          onClose: @escaping @Sendable () -> Void)
-    -> (HTTPResponse, @Sendable () -> Void) {
+    -> (HTTPResponse, cancel: @Sendable () -> Void, poke: @Sendable () -> Void) {
         let holder = ContinuationHolder()
         let stream = AsyncThrowingStream<String, Error> { continuation in
             holder.continuation = continuation
@@ -74,7 +76,8 @@ struct HTTPResponse {
         }
         let response = HTTPResponse(sseStream: stream, onOpen: onOpen, onClose: onClose)
         let cancel: @Sendable () -> Void = { holder.continuation?.finish() }
-        return (response, cancel)
+        let poke: @Sendable () -> Void = { holder.continuation?.yield("ping") }
+        return (response, cancel, poke)
     }
 
     nonisolated static var notFound: HTTPResponse { HTTPResponse(statusCode: 404, body: Data("{\"error\":\"not found\"}".utf8), contentType: "application/json") }
