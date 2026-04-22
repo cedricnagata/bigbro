@@ -15,6 +15,7 @@ struct BigBroApp: App {
 
         Settings {
             SettingsView()
+                .environmentObject(appModel.pairingManager)
         }
     }
 }

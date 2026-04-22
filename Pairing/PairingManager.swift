@@ -44,6 +44,11 @@ final class PairingManager: ObservableObject {
         approvedDevices.values.contains(token)
     }
 
+    func remove(deviceId: String) {
+        approvedDevices.removeValue(forKey: deviceId)
+        TokenStore.shared.delete(deviceId: deviceId)
+    }
+
     private func showAlert(for request: PairingRequest) {
         let alert = NSAlert()
         alert.messageText = "\(request.deviceName) wants to connect"

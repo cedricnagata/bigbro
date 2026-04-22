@@ -37,14 +37,16 @@ struct DeviceListView: View {
             Divider()
 
             SettingsLink {
-                Text("Settings…")
-                    .font(.subheadline)
+                Text("Settings")
+                    .frame(maxWidth: .infinity)
             }
+            .buttonStyle(.bordered)
 
             Button("Quit BigBro") {
                 NSApplication.shared.terminate(nil)
             }
-            .font(.subheadline)
+            .frame(maxWidth: .infinity)
+            .buttonStyle(.bordered)
         }
         .padding(12)
         .frame(width: 260)
