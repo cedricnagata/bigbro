@@ -63,9 +63,32 @@ final class AppRouter: HTTPServerDelegate, @unchecked Sendable {
             return await handlePairStatus(request)
         case ("POST", "/chat"):
             return await handleChat(request)
+        case ("GET", "/presence"):
+            return await handlePresence(request)
         default:
             return .notFound
         }
+    }
+
+    private func handlePresence(_ request: HTTPRequest) async -> HTTPResponse {
+        guard let token = request.queryItems["token"] else { return .unauthorized }
+        let deviceId = await MainActor.run { pairingManager.deviceId(forToken: token) }
+        guard let deviceId else { return .unauthorized }
+        let manager = pairingManager
+        print("[Router] /presence stream opening for \(deviceId)")
+        let (response, cancel) = HTTPResponse.presence(
+            onOpen: {
+                Task { @MainActor in manager.markConnected(deviceId) }
+            },
+            onClose: {
+                Task { @MainActor in
+                    manager.markDisconnected(deviceId)
+                    manager.unregisterPresence(deviceId)
+                }
+            }
+        )
+        await MainActor.run { manager.registerPresence(deviceId: deviceId, cancel: cancel) }
+        return response
     }
 
     private func handlePairRequest(_ request: HTTPRequest) async -> HTTPResponse {

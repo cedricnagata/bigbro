@@ -8,8 +8,10 @@ struct DeviceListView: View {
         if pairingManager.approvedDevices.isEmpty {
             Text("No paired devices")
         } else {
-            ForEach(Array(pairingManager.approvedDevices.keys), id: \.self) { deviceId in
-                Label(deviceId, systemImage: "iphone")
+            ForEach(Array(pairingManager.approvedDevices.keys).sorted(), id: \.self) { deviceId in
+                let connected = pairingManager.connectedDeviceIds.contains(deviceId)
+                let name = pairingManager.displayName(for: deviceId)
+                Text("\(connected ? "● " : "○ ")\(name)\(connected ? "" : " (disconnected)")")
                     .disabled(true)
             }
         }

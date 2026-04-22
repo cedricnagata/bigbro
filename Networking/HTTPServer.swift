@@ -14,19 +14,27 @@ struct HTTPResponse {
     let body: Data
     let contentType: String
     let sseStream: AsyncThrowingStream<String, Error>?
+    let onStreamOpened: (@Sendable () -> Void)?
+    let onStreamClosed: (@Sendable () -> Void)?
 
     init(statusCode: Int, body: Data, contentType: String) {
         self.statusCode = statusCode
         self.body = body
         self.contentType = contentType
         self.sseStream = nil
+        self.onStreamOpened = nil
+        self.onStreamClosed = nil
     }
 
-    private init(sseStream: AsyncThrowingStream<String, Error>) {
+    private init(sseStream: AsyncThrowingStream<String, Error>,
+                 onOpen: (@Sendable () -> Void)? = nil,
+                 onClose: (@Sendable () -> Void)? = nil) {
         self.statusCode = 200
         self.body = Data()
         self.contentType = "text/event-stream"
         self.sseStream = sseStream
+        self.onStreamOpened = onOpen
+        self.onStreamClosed = onClose
     }
 
     static func json(_ object: Any, status: Int = 200) -> HTTPResponse {
@@ -38,9 +46,44 @@ struct HTTPResponse {
         HTTPResponse(sseStream: stream)
     }
 
+    /// Long-lived SSE stream used for client presence detection. Sends a keepalive
+    /// every 30s; exits only when the client disconnects (or server cancels).
+    /// `onOpen` fires once the HTTP headers are sent; `onClose` fires when the
+    /// stream ends for any reason.
+    /// Returns a presence response and an external cancel closure. Invoking the
+    /// cancel closure finishes the stream — useful for forcing all clients to
+    /// reconnect (e.g. a manual Refresh in the UI).
+    static func presence(onOpen: @escaping @Sendable () -> Void,
+                         onClose: @escaping @Sendable () -> Void)
+    -> (HTTPResponse, @Sendable () -> Void) {
+        let holder = ContinuationHolder()
+        let stream = AsyncThrowingStream<String, Error> { continuation in
+            holder.continuation = continuation
+            let task = Task {
+                // Flush an immediate event so URLSession.bytes() returns the
+                // 200 response to the client without waiting for the first ping.
+                continuation.yield("hello")
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 10_000_000_000)
+                    if Task.isCancelled { break }
+                    continuation.yield("ping")
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+        let response = HTTPResponse(sseStream: stream, onOpen: onOpen, onClose: onClose)
+        let cancel: @Sendable () -> Void = { holder.continuation?.finish() }
+        return (response, cancel)
+    }
+
     nonisolated static var notFound: HTTPResponse { HTTPResponse(statusCode: 404, body: Data("{\"error\":\"not found\"}".utf8), contentType: "application/json") }
     nonisolated static var unauthorized: HTTPResponse { HTTPResponse(statusCode: 401, body: Data("{\"error\":\"unauthorized\"}".utf8), contentType: "application/json") }
     nonisolated static var badRequest: HTTPResponse { HTTPResponse(statusCode: 400, body: Data("{\"error\":\"bad request\"}".utf8), contentType: "application/json") }
+}
+
+private final class ContinuationHolder: @unchecked Sendable {
+    var continuation: AsyncThrowingStream<String, Error>.Continuation?
 }
 
 protocol HTTPServerDelegate: AnyObject {
@@ -108,9 +151,9 @@ actor HTTPServer {
             response = .notFound
         }
 
-        if let stream = response.sseStream {
+        if response.sseStream != nil {
             print("[HTTPServer] -> SSE stream")
-            await sendSSE(stream, on: connection)
+            await sendSSE(response, on: connection)
         } else {
             print("[HTTPServer] -> \(response.statusCode) body=\(String(data: response.body, encoding: .utf8) ?? "<binary>")")
             await send(response, on: connection)
@@ -227,26 +270,32 @@ actor HTTPServer {
         }
     }
 
-    private func sendSSE(_ stream: AsyncThrowingStream<String, Error>, on connection: NWConnection) async {
+    private func sendSSE(_ response: HTTPResponse, on connection: NWConnection) async {
         let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
-        await sendRaw(Data(headers.utf8), on: connection)
+        if await sendRaw(Data(headers.utf8), on: connection) != nil { return }
+        response.onStreamOpened?()
+        defer { response.onStreamClosed?() }
+        guard let stream = response.sseStream else { return }
         do {
             for try await delta in stream {
                 if let payload = try? JSONSerialization.data(withJSONObject: ["delta": delta]),
                    let payloadStr = String(data: payload, encoding: .utf8) {
-                    await sendRaw(Data("data: \(payloadStr)\n\n".utf8), on: connection)
+                    if let err = await sendRaw(Data("data: \(payloadStr)\n\n".utf8), on: connection) {
+                        print("[HTTPServer] SSE client disconnect: \(err)")
+                        return
+                    }
                 }
             }
         } catch {
             print("[HTTPServer] SSE stream error: \(error)")
         }
-        await sendRaw(Data("data: [DONE]\n\n".utf8), on: connection)
+        _ = await sendRaw(Data("data: [DONE]\n\n".utf8), on: connection)
     }
 
-    private func sendRaw(_ data: Data, on connection: NWConnection) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            connection.send(content: data, completion: .contentProcessed { _ in
-                continuation.resume()
+    private func sendRaw(_ data: Data, on connection: NWConnection) async -> NWError? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<NWError?, Never>) in
+            connection.send(content: data, completion: .contentProcessed { error in
+                continuation.resume(returning: error)
             })
         }
     }
