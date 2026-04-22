@@ -52,8 +52,8 @@ final class PairingManager: ObservableObject {
         presencePokes.removeValue(forKey: deviceId)
     }
 
-    /// Close the presence stream for a single device. The client (with
-    /// auto-reconnect dropped) will stay disconnected until it refreshes.
+    /// Close the presence stream. The device stays remembered, so a future
+    /// connect attempt from the same iOS device is auto-approved silently.
     func disconnect(deviceId: String) {
         presenceCancels[deviceId]?()
     }
@@ -77,8 +77,17 @@ final class PairingManager: ObservableObject {
     }
 
     func enqueue(_ request: PairingRequest) {
-        guard !approvedDevices.keys.contains(request.id),
-              !deniedDevices.contains(request.id),
+        // Previously-approved device reconnecting: silently refresh its name
+        // and short-circuit — no alert, status poll will immediately return
+        // approved with the stored token.
+        if approvedDevices.keys.contains(request.id) {
+            if deviceNames[request.id] != request.deviceName {
+                deviceNames[request.id] = request.deviceName
+                persistNames()
+            }
+            return
+        }
+        guard !deniedDevices.contains(request.id),
               !pendingRequests.contains(where: { $0.id == request.id }) else { return }
         pendingRequests.append(request)
         Task { showAlert(for: request) }
