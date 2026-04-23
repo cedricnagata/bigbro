@@ -6,8 +6,18 @@ enum InferenceError: Error {
     case invalidResponse
 }
 
+/// Prefix used to signal a tool_calls event through the String-typed SSE stream.
+/// HTTPServer.sendSSE detects this and emits the appropriate SSE event format.
+// Sentinel prefix used to pass tool_calls events through the String SSE stream.
+// HTTPServer.sendSSE detects this prefix and emits the proper wire format.
+// Must be 12 characters total (1 SOH + 11 ASCII) to match the dropFirst(12) in sendSSE.
+let toolCallsSentinel = "\u{0001}TOOL_CALLS:"
+
 struct InferenceProxy {
-    func forwardStream(messages: [[String: String]], model: String? = nil) -> AsyncThrowingStream<String, Error> {
+
+    func forwardStream(messages: [[String: Any]],
+                       model: String? = nil,
+                       tools: [[String: Any]] = []) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             Task {
                 do {
@@ -20,16 +30,32 @@ struct InferenceProxy {
                     var request = URLRequest(url: url)
                     request.httpMethod = "POST"
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                    let body: [String: Any] = ["model": resolvedModel, "messages": messages, "stream": true]
+
+                    var body: [String: Any] = [
+                        "model": resolvedModel,
+                        "messages": messages,
+                        "stream": true
+                    ]
+                    if !tools.isEmpty { body["tools"] = tools }
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
                     let (bytes, _) = try await URLSession.shared.bytes(for: request)
                     for try await line in bytes.lines {
                         guard !line.isEmpty,
                               let lineData = line.data(using: .utf8),
-                              let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else { continue }
-                        if let message = json["message"] as? [String: Any],
-                           let content = message["content"] as? String, !content.isEmpty {
-                            continuation.yield(content)
+                              let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
+                        else { continue }
+
+                        if let message = json["message"] as? [String: Any] {
+                            if let content = message["content"] as? String, !content.isEmpty {
+                                continuation.yield(content)
+                            }
+                            if let toolCalls = message["tool_calls"] {
+                                if let data = try? JSONSerialization.data(withJSONObject: toolCalls),
+                                   let jsonStr = String(data: data, encoding: .utf8) {
+                                    continuation.yield(toolCallsSentinel + jsonStr)
+                                }
+                            }
                         }
                         if let done = json["done"] as? Bool, done { break }
                     }
@@ -41,7 +67,7 @@ struct InferenceProxy {
         }
     }
 
-    func forward(messages: [[String: String]], model: String? = nil) async throws -> String {
+    func forward(messages: [[String: Any]], model: String? = nil) async throws -> String {
         let settings = AppSettings.shared
         guard let url = settings.chatURL else { throw InferenceError.invalidConfiguration }
 

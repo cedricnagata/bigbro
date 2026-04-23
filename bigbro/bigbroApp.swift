@@ -133,7 +133,7 @@ final class AppRouter: HTTPServerDelegate, @unchecked Sendable {
               let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
               let token = json["token"] as? String,
               let stream = json["stream"] as? Bool,
-              let messagesRaw = json["messages"] as? [[String: String]] else {
+              let messagesRaw = json["messages"] as? [[String: Any]] else {
             return .badRequest
         }
 
@@ -141,8 +141,9 @@ final class AppRouter: HTTPServerDelegate, @unchecked Sendable {
         guard isValid else { return .unauthorized }
 
         let model = json["model"] as? String
+        let tools = (json["tools"] as? [[String: Any]]) ?? []
         if stream {
-            let response = inferenceProxy.forwardStream(messages: messagesRaw, model: model)
+            let response = inferenceProxy.forwardStream(messages: messagesRaw, model: model, tools: tools)
             return .sse(response)
         } else {
             do {

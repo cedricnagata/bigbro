@@ -281,9 +281,22 @@ actor HTTPServer {
         guard let stream = response.sseStream else { return }
         do {
             for try await delta in stream {
-                if let payload = try? JSONSerialization.data(withJSONObject: ["delta": delta]),
-                   let payloadStr = String(data: payload, encoding: .utf8) {
-                    if let err = await sendRaw(Data("data: \(payloadStr)\n\n".utf8), on: connection) {
+                let wireData: Data?
+                if delta.hasPrefix("\u{0001}TOOL_CALLS:") {
+                    // Tool calls: emit {"tool_calls":[...]} so the iOS client can
+                    // run the handlers and send a follow-up request.
+                    let jsonStr = String(delta.dropFirst(12)) // "\u{0001}TOOL_CALLS:" = 12 chars
+                    wireData = "data: {\"tool_calls\":\(jsonStr)}\n\n".data(using: .utf8)
+                } else {
+                    if let payload = try? JSONSerialization.data(withJSONObject: ["delta": delta]),
+                       let payloadStr = String(data: payload, encoding: .utf8) {
+                        wireData = "data: \(payloadStr)\n\n".data(using: .utf8)
+                    } else {
+                        wireData = nil
+                    }
+                }
+                if let wd = wireData {
+                    if let err = await sendRaw(wd, on: connection) {
                         print("[HTTPServer] SSE client disconnect: \(err)")
                         return
                     }
