@@ -6,11 +6,9 @@ enum InferenceError: Error {
     case invalidResponse
 }
 
-/// Prefix used to signal a tool_calls event through the String-typed SSE stream.
-/// HTTPServer.sendSSE detects this and emits the appropriate SSE event format.
-// Sentinel prefix used to pass tool_calls events through the String SSE stream.
-// HTTPServer.sendSSE detects this prefix and emits the proper wire format.
-// Must be 12 characters total (1 SOH + 11 ASCII) to match the dropFirst(12) in sendSSE.
+// Sentinel prefix yielded when Ollama returns tool_calls in a streaming response.
+// AppRouter detects this prefix (12 chars: 1 SOH + "TOOL_CALLS:") and converts
+// it to a toolCall peer message.
 let toolCallsSentinel = "\u{0001}TOOL_CALLS:"
 
 struct InferenceProxy {

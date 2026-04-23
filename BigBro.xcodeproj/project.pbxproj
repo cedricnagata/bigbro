@@ -34,8 +34,8 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				BonjourAdvertiser.swift,
-				HTTPServer.swift,
 				InferenceProxy.swift,
+				PeerServer.swift,
 			);
 			target = 8BBE40932F96ACE800F9DB8F /* bigbro */;
 		};
@@ -43,14 +43,6 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				PairingManager.swift,
-				PairingRequest.swift,
-			);
-			target = 8BBE40932F96ACE800F9DB8F /* bigbro */;
-		};
-		8BBE41742F96B2FE00F9DB8F /* Exceptions for "Storage" folder in "bigbro" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				TokenStore.swift,
 			);
 			target = 8BBE40932F96ACE800F9DB8F /* bigbro */;
 		};
@@ -72,16 +64,6 @@
 			path = bigbro;
 			sourceTree = "<group>";
 		};
-		8BBE40A92F96ACE900F9DB8F /* bigbroTests */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = bigbroTests;
-			sourceTree = "<group>";
-		};
-		8BBE40B32F96ACE900F9DB8F /* bigbroUITests */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = bigbroUITests;
-			sourceTree = "<group>";
-		};
 		8BBE41612F96B2FD00F9DB8F /* Networking */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
@@ -96,14 +78,6 @@
 				8BBE41732F96B2FE00F9DB8F /* Exceptions for "Pairing" folder in "bigbro" target */,
 			);
 			path = Pairing;
-			sourceTree = "<group>";
-		};
-		8BBE41662F96B2FD00F9DB8F /* Storage */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				8BBE41742F96B2FE00F9DB8F /* Exceptions for "Storage" folder in "bigbro" target */,
-			);
-			path = Storage;
 			sourceTree = "<group>";
 		};
 		8BBE41692F96B2FD00F9DB8F /* UI */ = {
@@ -142,11 +116,8 @@
 			isa = PBXGroup;
 			children = (
 				8BBE40962F96ACE800F9DB8F /* bigbro */,
-				8BBE40A92F96ACE900F9DB8F /* bigbroTests */,
-				8BBE40B32F96ACE900F9DB8F /* bigbroUITests */,
 				8BBE41612F96B2FD00F9DB8F /* Networking */,
 				8BBE41642F96B2FD00F9DB8F /* Pairing */,
-				8BBE41662F96B2FD00F9DB8F /* Storage */,
 				8BBE41692F96B2FD00F9DB8F /* UI */,
 				8BBE41A42F96B75F00F9DB8F /* bigbro.app */,
 				8BBE420A2F96C3B100F9DB8F /* bigbroTests.xctest */,
@@ -193,9 +164,6 @@
 			dependencies = (
 				8BBE40A82F96ACE900F9DB8F /* PBXTargetDependency */,
 			);
-			fileSystemSynchronizedGroups = (
-				8BBE40A92F96ACE900F9DB8F /* bigbroTests */,
-			);
 			name = bigbroTests;
 			packageProductDependencies = (
 			);
@@ -215,9 +183,6 @@
 			);
 			dependencies = (
 				8BBE40B22F96ACE900F9DB8F /* PBXTargetDependency */,
-			);
-			fileSystemSynchronizedGroups = (
-				8BBE40B32F96ACE900F9DB8F /* bigbroUITests */,
 			);
 			name = bigbroUITests;
 			packageProductDependencies = (

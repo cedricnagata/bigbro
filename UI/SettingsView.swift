@@ -57,7 +57,7 @@ private struct DevicesSettingsTab: View {
                     Text("No paired devices")
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(Array(pairingManager.approvedDevices.keys).sorted(), id: \.self) { deviceId in
+                    ForEach(pairingManager.approvedDevices.sorted(), id: \.self) { deviceId in
                         DeviceRow(deviceId: deviceId)
                     }
                 }
@@ -117,13 +117,13 @@ private struct DeviceRow: View {
                 Button("Disconnect") {
                     pairingManager.disconnect(deviceId: deviceId)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.bordered)
             }
             Button("Remove") {
                 pairingManager.remove(deviceId: deviceId)
             }
-            .foregroundStyle(.red)
-            .buttonStyle(.plain)
+            .buttonStyle(.bordered)
+            .tint(.red)
         }
     }
 }
