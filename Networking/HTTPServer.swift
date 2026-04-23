@@ -17,7 +17,7 @@ struct HTTPResponse {
     let onStreamOpened: (@Sendable () -> Void)?
     let onStreamClosed: (@Sendable () -> Void)?
 
-    init(statusCode: Int, body: Data, contentType: String) {
+    nonisolated init(statusCode: Int, body: Data, contentType: String) {
         self.statusCode = statusCode
         self.body = body
         self.contentType = contentType
@@ -86,7 +86,7 @@ struct HTTPResponse {
 }
 
 private final class ContinuationHolder: @unchecked Sendable {
-    var continuation: AsyncThrowingStream<String, Error>.Continuation?
+    nonisolated(unsafe) var continuation: AsyncThrowingStream<String, Error>.Continuation?
 }
 
 protocol HTTPServerDelegate: AnyObject {

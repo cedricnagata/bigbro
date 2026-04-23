@@ -132,6 +132,7 @@ final class AppRouter: HTTPServerDelegate, @unchecked Sendable {
         guard let body = request.body,
               let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
               let token = json["token"] as? String,
+              let stream = json["stream"] as? Bool,
               let messagesRaw = json["messages"] as? [[String: String]] else {
             return .badRequest
         }
@@ -140,7 +141,17 @@ final class AppRouter: HTTPServerDelegate, @unchecked Sendable {
         guard isValid else { return .unauthorized }
 
         let model = json["model"] as? String
-        let stream = inferenceProxy.forwardStream(messages: messagesRaw, model: model)
-        return .sse(stream)
+        if stream {
+            let response = inferenceProxy.forwardStream(messages: messagesRaw, model: model)
+            return .sse(response)
+        } else {
+            do {
+                let response = try await inferenceProxy.forward(messages: messagesRaw, model: model)
+                return .json(["content": response])
+            } catch {
+                print("[Router] Chat forward failed: \(error)")
+                return .json(["error": "upstream failure"], status: 500)
+            }
+        }
     }
 }
