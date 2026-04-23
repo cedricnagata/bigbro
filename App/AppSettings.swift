@@ -15,6 +15,10 @@ final class AppSettings: ObservableObject {
         URL(string: baseURL + "/api/chat")
     }
 
+    var generateURL: URL? {
+        URL(string: baseURL + "/api/generate")
+    }
+
     private enum Keys {
         static let baseURL = "bigbro.baseURL"
         static let defaultModel = "bigbro.defaultModel"

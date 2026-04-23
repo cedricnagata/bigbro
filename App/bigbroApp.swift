@@ -103,6 +103,9 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         case "request":
             print("[AppRouter] request from \(deviceId.prefix(8))")
             await handleRequest(message, server: server, deviceId: deviceId)
+        case "generateRequest":
+            print("[AppRouter] generateRequest from \(deviceId.prefix(8))")
+            await handleGenerateRequest(message, server: server, deviceId: deviceId)
         case "ping":
             print("[AppRouter] ping from \(deviceId.prefix(8)), sending pong")
             await server.send(["type": "pong"], to: deviceId)
@@ -120,22 +123,36 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         await MainActor.run { pairingManager.markDisconnected(deviceId) }
     }
 
+    // MARK: - Request handlers
+
     private func handleRequest(_ message: [String: Any], server: PeerServer, deviceId: String) async {
         guard let requestId = message["requestId"] as? String,
               let messagesRaw = message["messages"] as? [[String: Any]] else {
             print("[AppRouter] handleRequest: missing requestId or messages")
             return
         }
-        let tools = (message["tools"] as? [[String: Any]]) ?? []
+        let tools     = (message["tools"] as? [[String: Any]]) ?? []
         let streaming = message["streaming"] as? Bool ?? true
-        let model: String? = nil
+        let model     = message["model"] as? String
+        let format    = message["format"]               // Any? — "json" string or schema dict
+        let options   = message["options"] as? [String: Any]
+        let think     = message["think"] as? Bool
+        let keepAlive = message["keep_alive"] as? String
 
         print("[AppRouter] handleRequest: requestId=\(requestId.prefix(8)) streaming=\(streaming) tools=\(tools.count) messages=\(messagesRaw.count)")
 
         do {
             if streaming {
                 var chunkCount = 0
-                for try await delta in inferenceProxy.forwardStream(messages: messagesRaw, model: model, tools: tools) {
+                for try await delta in inferenceProxy.forwardStream(
+                    messages: messagesRaw,
+                    model: model,
+                    tools: tools,
+                    format: format,
+                    options: options,
+                    think: think,
+                    keepAlive: keepAlive
+                ) {
                     if delta.hasPrefix("\u{0001}TOOL_CALLS:") {
                         let jsonStr = String(delta.dropFirst(12))
                         if let data = jsonStr.data(using: .utf8),
@@ -150,7 +167,15 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
                 }
                 print("[AppRouter] Stream complete for \(requestId.prefix(8)): \(chunkCount) chunk(s)")
             } else {
-                let reply = try await inferenceProxy.forward(messages: messagesRaw, model: model)
+                let reply = try await inferenceProxy.forward(
+                    messages: messagesRaw,
+                    model: model,
+                    tools: tools,
+                    format: format,
+                    options: options,
+                    think: think,
+                    keepAlive: keepAlive
+                )
                 print("[AppRouter] Non-streaming reply for \(requestId.prefix(8)): \(reply.count) chars")
                 await server.send(["type": "chunk", "requestId": requestId, "delta": reply], to: deviceId)
             }
@@ -158,6 +183,71 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
             print("[AppRouter] done sent for \(requestId.prefix(8))")
         } catch {
             print("[AppRouter] Inference error for \(requestId.prefix(8)): \(error)")
+            await server.send(["type": "error", "requestId": requestId, "message": error.localizedDescription], to: deviceId)
+        }
+    }
+
+    private func handleGenerateRequest(_ message: [String: Any], server: PeerServer, deviceId: String) async {
+        guard let requestId = message["requestId"] as? String,
+              let prompt = message["prompt"] as? String else {
+            print("[AppRouter] handleGenerateRequest: missing requestId or prompt")
+            return
+        }
+        let images    = (message["images"] as? [String]) ?? []
+        let suffix    = message["suffix"] as? String
+        let system    = message["system"] as? String
+        let template  = message["template"] as? String
+        let model     = message["model"] as? String
+        let format    = message["format"]
+        let options   = message["options"] as? [String: Any]
+        let raw       = message["raw"] as? Bool
+        let think     = message["think"] as? Bool
+        let keepAlive = message["keep_alive"] as? String
+        let streaming = message["streaming"] as? Bool ?? true
+
+        print("[AppRouter] handleGenerateRequest: requestId=\(requestId.prefix(8)) streaming=\(streaming) prompt='\(prompt.prefix(40))…'")
+
+        do {
+            if streaming {
+                var chunkCount = 0
+                for try await delta in inferenceProxy.forwardGenerateStream(
+                    prompt: prompt,
+                    images: images,
+                    suffix: suffix,
+                    system: system,
+                    template: template,
+                    model: model,
+                    format: format,
+                    options: options,
+                    raw: raw,
+                    think: think,
+                    keepAlive: keepAlive
+                ) {
+                    chunkCount += 1
+                    await server.send(["type": "chunk", "requestId": requestId, "delta": delta], to: deviceId)
+                }
+                print("[AppRouter] Generate stream complete for \(requestId.prefix(8)): \(chunkCount) chunk(s)")
+            } else {
+                let reply = try await inferenceProxy.forwardGenerate(
+                    prompt: prompt,
+                    images: images,
+                    suffix: suffix,
+                    system: system,
+                    template: template,
+                    model: model,
+                    format: format,
+                    options: options,
+                    raw: raw,
+                    think: think,
+                    keepAlive: keepAlive
+                )
+                print("[AppRouter] Non-streaming generate reply for \(requestId.prefix(8)): \(reply.count) chars")
+                await server.send(["type": "chunk", "requestId": requestId, "delta": reply], to: deviceId)
+            }
+            await server.send(["type": "done", "requestId": requestId], to: deviceId)
+            print("[AppRouter] done sent for \(requestId.prefix(8))")
+        } catch {
+            print("[AppRouter] Generate error for \(requestId.prefix(8)): \(error)")
             await server.send(["type": "error", "requestId": requestId, "message": error.localizedDescription], to: deviceId)
         }
     }
