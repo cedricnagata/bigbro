@@ -183,8 +183,8 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
                     think: think,
                     keepAlive: keepAlive
                 ) {
-                    if delta.hasPrefix("\u{0001}TOOL_CALLS:") {
-                        let jsonStr = String(delta.dropFirst(12))
+                    if delta.hasPrefix(toolCallsSentinel) {
+                        let jsonStr = String(delta.dropFirst(toolCallsSentinel.count))
                         if let data = jsonStr.data(using: .utf8),
                            let calls = try? JSONSerialization.jsonObject(with: data) {
                             print("[AppRouter] toolCall detected for \(requestId.prefix(8))")

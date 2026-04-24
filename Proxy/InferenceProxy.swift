@@ -13,6 +13,21 @@ let toolCallsSentinel = "\u{0001}TOOL_CALLS:"
 
 struct InferenceProxy {
 
+    // MARK: - Helpers
+
+    private func resolvedModel(_ model: String?) -> String {
+        let s = AppSettings.shared
+        return model?.isEmpty == false ? model! : s.defaultModel
+    }
+
+    private func jsonPOSTRequest(url: URL, body: [String: Any]) throws -> URLRequest {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return request
+    }
+
     // MARK: - /api/chat (streaming)
 
     func forwardStream(
@@ -27,18 +42,12 @@ struct InferenceProxy {
         AsyncThrowingStream { continuation in
             Task {
                 do {
-                    let settings = AppSettings.shared
-                    guard let url = settings.chatURL else {
+                    guard let url = AppSettings.shared.chatURL else {
                         continuation.finish(throwing: InferenceError.invalidConfiguration)
                         return
                     }
-                    let resolvedModel = model?.isEmpty == false ? model! : settings.defaultModel
-                    var request = URLRequest(url: url)
-                    request.httpMethod = "POST"
-                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
                     var body: [String: Any] = [
-                        "model": resolvedModel,
+                        "model": resolvedModel(model),
                         "messages": messages,
                         "stream": true
                     ]
@@ -47,7 +56,7 @@ struct InferenceProxy {
                     if let options, !options.isEmpty { body["options"] = options }
                     if let think                 { body["think"] = think }
                     if let keepAlive             { body["keep_alive"] = keepAlive }
-                    request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                    let request = try jsonPOSTRequest(url: url, body: body)
 
                     let (bytes, _) = try await URLSession.shared.bytes(for: request)
                     for try await line in bytes.lines {
@@ -88,22 +97,15 @@ struct InferenceProxy {
         think: Bool? = nil,
         keepAlive: String? = nil
     ) async throws -> String {
-        let settings = AppSettings.shared
-        guard let url = settings.chatURL else { throw InferenceError.invalidConfiguration }
+        guard let url = AppSettings.shared.chatURL else { throw InferenceError.invalidConfiguration }
 
-        let resolvedModel = model?.isEmpty == false ? model! : settings.defaultModel
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        var body: [String: Any] = ["model": resolvedModel, "messages": messages, "stream": false]
+        var body: [String: Any] = ["model": resolvedModel(model), "messages": messages, "stream": false]
         if !tools.isEmpty            { body["tools"] = tools }
         if let format                { body["format"] = format }
         if let options, !options.isEmpty { body["options"] = options }
         if let think                 { body["think"] = think }
         if let keepAlive             { body["keep_alive"] = keepAlive }
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let request = try jsonPOSTRequest(url: url, body: body)
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
@@ -137,18 +139,12 @@ struct InferenceProxy {
         AsyncThrowingStream { continuation in
             Task {
                 do {
-                    let settings = AppSettings.shared
-                    guard let url = settings.generateURL else {
+                    guard let url = AppSettings.shared.generateURL else {
                         continuation.finish(throwing: InferenceError.invalidConfiguration)
                         return
                     }
-                    let resolvedModel = model?.isEmpty == false ? model! : settings.defaultModel
-                    var request = URLRequest(url: url)
-                    request.httpMethod = "POST"
-                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
                     var body: [String: Any] = [
-                        "model": resolvedModel,
+                        "model": resolvedModel(model),
                         "prompt": prompt,
                         "stream": true
                     ]
@@ -161,7 +157,7 @@ struct InferenceProxy {
                     if let raw                   { body["raw"] = raw }
                     if let think                 { body["think"] = think }
                     if let keepAlive             { body["keep_alive"] = keepAlive }
-                    request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                    let request = try jsonPOSTRequest(url: url, body: body)
 
                     let (bytes, _) = try await URLSession.shared.bytes(for: request)
                     for try await line in bytes.lines {
@@ -198,16 +194,9 @@ struct InferenceProxy {
         think: Bool? = nil,
         keepAlive: String? = nil
     ) async throws -> String {
-        let settings = AppSettings.shared
-        guard let url = settings.generateURL else { throw InferenceError.invalidConfiguration }
+        guard let url = AppSettings.shared.generateURL else { throw InferenceError.invalidConfiguration }
 
-        let resolvedModel = model?.isEmpty == false ? model! : settings.defaultModel
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        var body: [String: Any] = ["model": resolvedModel, "prompt": prompt, "stream": false]
+        var body: [String: Any] = ["model": resolvedModel(model), "prompt": prompt, "stream": false]
         if !images.isEmpty           { body["images"] = images }
         if let suffix                { body["suffix"] = suffix }
         if let system                { body["system"] = system }
@@ -217,7 +206,7 @@ struct InferenceProxy {
         if let raw                   { body["raw"] = raw }
         if let think                 { body["think"] = think }
         if let keepAlive             { body["keep_alive"] = keepAlive }
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let request = try jsonPOSTRequest(url: url, body: body)
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
