@@ -72,7 +72,6 @@ final class AppModel: ObservableObject {
 final class AppRouter: PeerServerDelegate, @unchecked Sendable {
     private let pairingManager: PairingManager
     private let inferenceProxy = InferenceProxy()
-    private var lastSeen: [String: Date] = [:]
     private var heartbeatTask: Task<Void, Never>?
     weak var server: PeerServer?
 
@@ -98,10 +97,9 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         let connected = await MainActor.run { pairingManager.connectedDeviceIds }
         let now = Date()
         for deviceId in connected {
-            let last = lastSeen[deviceId] ?? now   // treat freshly connected devices as seen now
+            let last = await server.lastHeardDate(for: deviceId) ?? now   // treat freshly connected devices as seen now
             if now.timeIntervalSince(last) > 15 {
                 print("[AppRouter] Heartbeat timeout for \(deviceId.prefix(8)), disconnecting")
-                lastSeen.removeValue(forKey: deviceId)
                 await MainActor.run { pairingManager.markDisconnected(deviceId) }
                 await server.disconnect(deviceId: deviceId)
             } else {
@@ -132,9 +130,6 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
             return
         }
 
-        // Any message from a registered device resets its heartbeat timer
-        lastSeen[deviceId] = Date()
-
         switch type {
         case "request":
             print("[AppRouter] request from \(deviceId.prefix(8))")
@@ -142,14 +137,10 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         case "generateRequest":
             print("[AppRouter] generateRequest from \(deviceId.prefix(8))")
             await handleGenerateRequest(message, server: server, deviceId: deviceId)
-        case "ping":
-            print("[AppRouter] ping from \(deviceId.prefix(8)), sending pong")
-            await server.send(["type": "pong"], to: deviceId)
         case "pong":
             print("[AppRouter] pong from \(deviceId.prefix(8))")
         case "bye":
             print("[AppRouter] bye from \(deviceId.prefix(8)), marking disconnected")
-            lastSeen.removeValue(forKey: deviceId)
             await MainActor.run { pairingManager.markDisconnected(deviceId) }
             await server.disconnect(deviceId: deviceId)
         default:
@@ -159,7 +150,6 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
 
     func peerServer(_ server: PeerServer, didDisconnectPeer deviceId: String) async {
         print("[AppRouter] Peer disconnected: \(deviceId.prefix(8))")
-        lastSeen.removeValue(forKey: deviceId)
         await MainActor.run { pairingManager.markDisconnected(deviceId) }
     }
 

@@ -11,6 +11,7 @@ actor PeerServer {
     private var pending: [UUID: NWConnection] = [:]      // before hello
     private var peers: [String: NWConnection] = [:]      // after hello: deviceId → connection
     private var connectionIds: [UUID: String] = [:]      // connectionId → deviceId
+    private var lastHeard: [String: Date] = [:]          // deviceId → last message timestamp
     weak var delegate: PeerServerDelegate?
 
     func setDelegate(_ delegate: PeerServerDelegate) {
@@ -65,6 +66,10 @@ actor PeerServer {
         connectionIds[connectionId]
     }
 
+    func lastHeardDate(for deviceId: String) -> Date? {
+        lastHeard[deviceId]
+    }
+
     func send(_ message: [String: Any], to deviceId: String) async {
         guard let conn = peers[deviceId] else {
             print("[PeerServer] send: no peer for deviceId \(deviceId.prefix(8))")
@@ -87,6 +92,7 @@ actor PeerServer {
         await send(["type": "bye"], to: deviceId)
         peers[deviceId]?.cancel()
         peers.removeValue(forKey: deviceId)
+        lastHeard.removeValue(forKey: deviceId)
         // connectionIds left intact so readLoop can detect closure and call didDisconnectPeer
     }
 
@@ -137,6 +143,7 @@ actor PeerServer {
         if let deviceId {
             peers[deviceId]?.cancel()
             peers.removeValue(forKey: deviceId)
+            lastHeard.removeValue(forKey: deviceId)
             print("[PeerServer] Device \(deviceId.prefix(8)) disconnected via viability loss")
             await delegate?.peerServer(self, didDisconnectPeer: deviceId)
         }
@@ -160,6 +167,15 @@ actor PeerServer {
                 buffer = Data(buffer[(4 + length)...])
                 if let json = try? JSONSerialization.jsonObject(with: msgData) as? [String: Any] {
                     print("[PeerServer] ← \(connectionId): type=\(json["type"] ?? "?")")
+                    // Update last-heard for any registered device without waiting on the delegate
+                    if let deviceId = connectionIds[connectionId] {
+                        lastHeard[deviceId] = Date()
+                        // Handle ping directly so it's never blocked by an in-flight delegate call
+                        if json["type"] as? String == "ping" {
+                            await send(["type": "pong"], to: deviceId)
+                            continue
+                        }
+                    }
                     await delegate?.peerServer(self, didReceive: json, connectionId: connectionId)
                 } else {
                     print("[PeerServer] Failed to parse message from \(connectionId) (\(length) bytes)")
@@ -170,6 +186,7 @@ actor PeerServer {
         pending.removeValue(forKey: connectionId)
         if let deviceId {
             peers.removeValue(forKey: deviceId)
+            lastHeard.removeValue(forKey: deviceId)
             print("[PeerServer] Device \(deviceId.prefix(8)) disconnected")
             await delegate?.peerServer(self, didDisconnectPeer: deviceId)
         } else {
