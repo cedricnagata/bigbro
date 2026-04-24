@@ -53,7 +53,6 @@ final class AppModel: ObservableObject {
             do {
                 try await server.start(port: 8765)
                 advertiser.start(port: 8765)
-                router.startHeartbeat(server: server)
                 print("[BigBro] Server started on port 8765")
             } catch {
                 print("[BigBro] Failed to start server: \(error)")
@@ -72,40 +71,11 @@ final class AppModel: ObservableObject {
 final class AppRouter: PeerServerDelegate, @unchecked Sendable {
     private let pairingManager: PairingManager
     private let inferenceProxy = InferenceProxy()
-    private var heartbeatTask: Task<Void, Never>?
     weak var server: PeerServer?
 
     init(pairingManager: PairingManager) {
         self.pairingManager = pairingManager
         print("[AppRouter] Initialized")
-    }
-
-    func startHeartbeat(server: PeerServer) {
-        self.server = server
-        heartbeatTask?.cancel()
-        heartbeatTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(10))
-                guard !Task.isCancelled, let self else { break }
-                await self.checkHeartbeats()
-            }
-        }
-    }
-
-    private func checkHeartbeats() async {
-        guard let server else { return }
-        let connected = await MainActor.run { pairingManager.connectedDeviceIds }
-        let now = Date()
-        for deviceId in connected {
-            let last = await server.lastHeardDate(for: deviceId) ?? now   // treat freshly connected devices as seen now
-            if now.timeIntervalSince(last) > 15 {
-                print("[AppRouter] Heartbeat timeout for \(deviceId.prefix(8)), disconnecting")
-                await MainActor.run { pairingManager.markDisconnected(deviceId) }
-                await server.disconnect(deviceId: deviceId)
-            } else {
-                await server.send(["type": "ping"], to: deviceId)
-            }
-        }
     }
 
     func peerServer(_ server: PeerServer, didReceive message: [String: Any], connectionId: UUID) async {
@@ -137,8 +107,6 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         case "generateRequest":
             print("[AppRouter] generateRequest from \(deviceId.prefix(8))")
             await handleGenerateRequest(message, server: server, deviceId: deviceId)
-        case "pong":
-            print("[AppRouter] pong from \(deviceId.prefix(8))")
         case "bye":
             print("[AppRouter] bye from \(deviceId.prefix(8)), marking disconnected")
             await MainActor.run { pairingManager.markDisconnected(deviceId) }

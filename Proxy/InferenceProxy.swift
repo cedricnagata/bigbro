@@ -25,6 +25,7 @@ struct InferenceProxy {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.timeoutInterval = 300  // 5 min cap for very slow models
         return request
     }
 
