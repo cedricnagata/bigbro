@@ -207,7 +207,16 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
                     keepAlive: keepAlive
                 )
                 print("[AppRouter] Non-streaming reply for \(requestId.prefix(8)): \(reply.count) chars")
-                await server.send(["type": "chunk", "requestId": requestId, "delta": reply], to: deviceId)
+                if reply.hasPrefix(toolCallsSentinel) {
+                    let jsonStr = String(reply.dropFirst(toolCallsSentinel.count))
+                    if let tcData = jsonStr.data(using: .utf8),
+                       let calls = try? JSONSerialization.jsonObject(with: tcData) {
+                        print("[AppRouter] toolCall detected for \(requestId.prefix(8))")
+                        await server.send(["type": "toolCall", "requestId": requestId, "calls": calls], to: deviceId)
+                    }
+                } else {
+                    await server.send(["type": "chunk", "requestId": requestId, "delta": reply], to: deviceId)
+                }
             }
             await server.send(["type": "done", "requestId": requestId], to: deviceId)
             print("[AppRouter] done sent for \(requestId.prefix(8))")

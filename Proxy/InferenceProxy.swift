@@ -114,8 +114,15 @@ struct InferenceProxy {
         }
 
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let message = json["message"] as? [String: Any],
-              let content = message["content"] as? String else {
+              let message = json["message"] as? [String: Any] else {
+            throw InferenceError.invalidResponse
+        }
+        if let toolCalls = message["tool_calls"],
+           let tcData = try? JSONSerialization.data(withJSONObject: toolCalls),
+           let tcStr = String(data: tcData, encoding: .utf8) {
+            return toolCallsSentinel + tcStr
+        }
+        guard let content = message["content"] as? String else {
             throw InferenceError.invalidResponse
         }
         return content
