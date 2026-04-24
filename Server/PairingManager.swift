@@ -9,6 +9,7 @@ final class PairingManager: ObservableObject {
     @Published var connectedDeviceIds: Set<String> = []
 
     weak var peerServer: PeerServer?
+    weak var ollamaMonitor: OllamaMonitor?
 
     private static let approvedDevicesKey = "bigbro.approvedDevices"
     private static let deviceNamesKey = "bigbro.deviceNames"
@@ -36,7 +37,7 @@ final class PairingManager: ObservableObject {
     /// Called by AppRouter on each hello message.
     /// Registers the connection (auto-approve known, show alert for new).
     /// Returns true if approved.
-    func handleHello(deviceId: String, deviceName: String, connectionId: UUID, server: PeerServer) async {
+    func handleHello(deviceId: String, deviceName: String, requiredModels: [String], connectionId: UUID, server: PeerServer) async {
         print("[PairingManager] handleHello: deviceId=\(deviceId.prefix(8)) name='\(deviceName)' connectionId=\(connectionId)")
 
         if approvedDevices.contains(deviceId) {
@@ -49,6 +50,7 @@ final class PairingManager: ObservableObject {
             await server.register(connectionId: connectionId, as: deviceId)
             await server.send(["type": "helloAck", "status": "approved"], to: deviceId)
             print("[PairingManager] helloAck(approved) sent to \(deviceId.prefix(8))")
+            promptModelDownloadIfNeeded(deviceName: deviceName, requiredModels: requiredModels)
             return
         }
 
@@ -65,10 +67,30 @@ final class PairingManager: ObservableObject {
             await server.register(connectionId: connectionId, as: deviceId)
             await server.send(["type": "helloAck", "status": "approved"], to: deviceId)
             print("[PairingManager] helloAck(approved) sent to \(deviceId.prefix(8))")
+            promptModelDownloadIfNeeded(deviceName: deviceName, requiredModels: requiredModels)
         } else {
             await server.send(["type": "helloAck", "status": "denied"], toPending: connectionId)
             await server.disconnectPending(connectionId: connectionId)
             print("[PairingManager] helloAck(denied) sent and connection closed")
+        }
+    }
+
+    private func promptModelDownloadIfNeeded(deviceName: String, requiredModels: [String]) {
+        guard let monitor = ollamaMonitor,
+              monitor.status == .running,
+              !requiredModels.isEmpty else { return }
+        let missing = monitor.missingModels(from: requiredModels)
+        guard !missing.isEmpty else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "Missing Models"
+        alert.informativeText = "\(deviceName) requires: \(missing.joined(separator: ", ")).\n\nPull from Ollama now?"
+        alert.addButton(withTitle: "Pull")
+        alert.addButton(withTitle: "Later")
+        alert.alertStyle = .informational
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            for model in missing { monitor.pull(model) }
         }
     }
 

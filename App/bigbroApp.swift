@@ -11,12 +11,14 @@ struct BigBroApp: App {
         MenuBarExtra("BigBro", image: "bigbro") {
             DeviceListView()
                 .environmentObject(appModel.pairingManager)
+                .environmentObject(appModel.ollamaMonitor)
                 .onAppear { appDelegate.appModel = appModel }
         }
 
         Settings {
             SettingsView()
                 .environmentObject(appModel.pairingManager)
+                .environmentObject(appModel.ollamaMonitor)
         }
     }
 }
@@ -41,6 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 final class AppModel: ObservableObject {
     let pairingManager = PairingManager()
+    let ollamaMonitor = OllamaMonitor()
     private let server = PeerServer()
     private let advertiser = BonjourAdvertiser()
     private let router: AppRouter  // must be retained — delegate is weak
@@ -48,6 +51,8 @@ final class AppModel: ObservableObject {
     init() {
         router = AppRouter(pairingManager: pairingManager)
         pairingManager.peerServer = server
+        pairingManager.ollamaMonitor = ollamaMonitor
+        ollamaMonitor.start()
         Task {
             await server.setDelegate(router)
             do {
@@ -62,6 +67,7 @@ final class AppModel: ObservableObject {
 
     func shutdown() async {
         print("[BigBro] Shutting down")
+        ollamaMonitor.stop()
         await server.shutdown()
     }
 }
@@ -88,8 +94,9 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         if type == "hello" {
             let deviceId = message["deviceId"] as? String ?? ""
             let deviceName = message["deviceName"] as? String ?? "Unknown"
-            print("[AppRouter] hello from deviceId=\(deviceId.prefix(8)) name='\(deviceName)'")
-            await pairingManager.handleHello(deviceId: deviceId, deviceName: deviceName, connectionId: connectionId, server: server)
+            let requiredModels = message["requiredModels"] as? [String] ?? []
+            print("[AppRouter] hello from deviceId=\(deviceId.prefix(8)) name='\(deviceName)' requiredModels=\(requiredModels)")
+            await pairingManager.handleHello(deviceId: deviceId, deviceName: deviceName, requiredModels: requiredModels, connectionId: connectionId, server: server)
             return
         }
 

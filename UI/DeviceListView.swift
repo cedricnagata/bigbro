@@ -2,9 +2,16 @@ import SwiftUI
 
 struct DeviceListView: View {
     @EnvironmentObject var pairingManager: PairingManager
+    @EnvironmentObject var ollamaMonitor: OllamaMonitor
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
+        if ollamaMonitor.status == .unreachable {
+            Label("Ollama not running", systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.orange)
+                .font(.caption)
+        }
+
         if pairingManager.approvedDevices.isEmpty {
             Text("No paired devices")
         } else {

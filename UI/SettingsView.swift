@@ -17,20 +17,28 @@ struct SettingsView: View {
 
 private struct GeneralSettingsTab: View {
     @ObservedObject private var settings = AppSettings.shared
+    @EnvironmentObject var ollamaMonitor: OllamaMonitor
 
     var body: some View {
         Form {
             Section {
-                LabeledContent("Server URL") {
-                    TextField("http://localhost:11434", text: $settings.baseURL)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 280)
+                LabeledContent("Ollama") {
+                    OllamaStatusView()
                 }
 
                 LabeledContent("Default Model") {
-                    TextField("e.g. gpt-oss-20b", text: $settings.defaultModel)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 280)
+                    Picker("Default Model", selection: $settings.defaultModel) {
+                        if !ollamaMonitor.installedModels.contains(settings.defaultModel) {
+                            Text(settings.defaultModel).tag(settings.defaultModel)
+                            Divider()
+                        }
+                        ForEach(ollamaMonitor.installedModels, id: \.self) { model in
+                            Text(model).tag(model)
+                        }
+                    }
+                    .labelsHidden()
+                    .disabled(ollamaMonitor.installedModels.isEmpty)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
                 }
             } header: {
                 Text("Inference Backend")
@@ -39,8 +47,50 @@ private struct GeneralSettingsTab: View {
                     .foregroundStyle(.secondary)
                     .font(.caption)
             }
+
+            if !ollamaMonitor.pullingModels.isEmpty {
+                Section("Downloading Models") {
+                    ForEach(Array(ollamaMonitor.pullingModels).sorted(), id: \.self) { model in
+                        HStack {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text(model)
+                        }
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
+    }
+}
+
+private struct OllamaStatusView: View {
+    @EnvironmentObject var monitor: OllamaMonitor
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(statusColor)
+                .frame(width: 8, height: 8)
+            Text(statusText)
+                .foregroundStyle(monitor.status == .unreachable ? .red : .primary)
+        }
+    }
+
+    private var statusColor: Color {
+        switch monitor.status {
+        case .unknown:     return .secondary
+        case .running:     return .green
+        case .unreachable: return .red
+        }
+    }
+
+    private var statusText: String {
+        switch monitor.status {
+        case .unknown:     return "Checking…"
+        case .running:     return "Running (\(monitor.installedModels.count) model\(monitor.installedModels.count == 1 ? "" : "s"))"
+        case .unreachable: return "Not running — start Ollama to use BigBro"
+        }
     }
 }
 

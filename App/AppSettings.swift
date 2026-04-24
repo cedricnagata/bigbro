@@ -3,29 +3,16 @@ import Combine
 
 final class AppSettings: ObservableObject {
     static let shared = AppSettings()
+    static let ollamaBaseURL = "http://localhost:11434"
 
-    @Published var baseURL: String {
-        didSet { UserDefaults.standard.set(baseURL, forKey: Keys.baseURL) }
-    }
     @Published var defaultModel: String {
-        didSet { UserDefaults.standard.set(defaultModel, forKey: Keys.defaultModel) }
+        didSet { UserDefaults.standard.set(defaultModel, forKey: "bigbro.defaultModel") }
     }
 
-    var chatURL: URL? {
-        URL(string: baseURL + "/api/chat")
-    }
-
-    var generateURL: URL? {
-        URL(string: baseURL + "/api/generate")
-    }
-
-    private enum Keys {
-        static let baseURL = "bigbro.baseURL"
-        static let defaultModel = "bigbro.defaultModel"
-    }
+    var chatURL: URL? { URL(string: Self.ollamaBaseURL + "/api/chat") }
+    var generateURL: URL? { URL(string: Self.ollamaBaseURL + "/api/generate") }
 
     init() {
-        baseURL = UserDefaults.standard.string(forKey: Keys.baseURL) ?? "http://localhost:11434"
-        defaultModel = UserDefaults.standard.string(forKey: Keys.defaultModel) ?? "gpt-oss-20b"
+        defaultModel = UserDefaults.standard.string(forKey: "bigbro.defaultModel") ?? "gpt-oss-20b"
     }
 }
