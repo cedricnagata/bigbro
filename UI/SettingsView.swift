@@ -48,17 +48,6 @@ private struct GeneralSettingsTab: View {
                     .font(.caption)
             }
 
-            if !ollamaMonitor.pullingModels.isEmpty {
-                Section("Downloading Models") {
-                    ForEach(Array(ollamaMonitor.pullingModels).sorted(), id: \.self) { model in
-                        HStack {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text(model)
-                        }
-                    }
-                }
-            }
         }
         .formStyle(.grouped)
     }

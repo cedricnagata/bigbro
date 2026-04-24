@@ -49,7 +49,7 @@ final class AppModel: ObservableObject {
     private let router: AppRouter  // must be retained — delegate is weak
 
     init() {
-        router = AppRouter(pairingManager: pairingManager)
+        router = AppRouter(pairingManager: pairingManager, ollamaMonitor: ollamaMonitor)
         pairingManager.peerServer = server
         pairingManager.ollamaMonitor = ollamaMonitor
         ollamaMonitor.start()
@@ -77,10 +77,12 @@ final class AppModel: ObservableObject {
 final class AppRouter: PeerServerDelegate, @unchecked Sendable {
     private let pairingManager: PairingManager
     private let inferenceProxy = InferenceProxy()
+    private let ollamaMonitor: OllamaMonitor
     weak var server: PeerServer?
 
-    init(pairingManager: PairingManager) {
+    init(pairingManager: PairingManager, ollamaMonitor: OllamaMonitor) {
         self.pairingManager = pairingManager
+        self.ollamaMonitor = ollamaMonitor
         print("[AppRouter] Initialized")
     }
 
@@ -143,6 +145,18 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         let keepAlive = message["keep_alive"] as? String
 
         print("[AppRouter] handleRequest: requestId=\(requestId.prefix(8)) streaming=\(streaming) tools=\(tools.count) messages=\(messagesRaw.count)")
+
+        let resolvedModel = await MainActor.run {
+            model?.isEmpty == false ? model! : AppSettings.shared.defaultModel
+        }
+        let modelInstalled = await MainActor.run { ollamaMonitor.isInstalled(resolvedModel) }
+        guard modelInstalled else {
+            print("[AppRouter] Model '\(resolvedModel)' not installed, returning error")
+            await server.send(["type": "error", "requestId": requestId,
+                               "message": "Model '\(resolvedModel)' is not downloaded in Ollama. Open Ollama to download it first."],
+                              to: deviceId)
+            return
+        }
 
         do {
             if streaming {
@@ -218,6 +232,18 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         let streaming = message["streaming"] as? Bool ?? true
 
         print("[AppRouter] handleGenerateRequest: requestId=\(requestId.prefix(8)) streaming=\(streaming) prompt='\(prompt.prefix(40))…'")
+
+        let resolvedModel = await MainActor.run {
+            model?.isEmpty == false ? model! : AppSettings.shared.defaultModel
+        }
+        let modelInstalled = await MainActor.run { ollamaMonitor.isInstalled(resolvedModel) }
+        guard modelInstalled else {
+            print("[AppRouter] Model '\(resolvedModel)' not installed, returning error")
+            await server.send(["type": "error", "requestId": requestId,
+                               "message": "Model '\(resolvedModel)' is not downloaded in Ollama. Open Ollama to download it first."],
+                              to: deviceId)
+            return
+        }
 
         do {
             if streaming {

@@ -9,7 +9,6 @@ final class OllamaMonitor: ObservableObject {
 
     @Published var status: Status = .unknown
     @Published var installedModels: [String] = []
-    @Published var pullingModels: Set<String> = []
 
     private var pollTask: Task<Void, Never>?
 
@@ -53,26 +52,5 @@ final class OllamaMonitor: ObservableObject {
 
     func missingModels(from required: [String]) -> [String] {
         required.filter { !isInstalled($0) }
-    }
-
-    func pull(_ model: String) {
-        guard !pullingModels.contains(model) else { return }
-        pullingModels.insert(model)
-        Task {
-            defer { pullingModels.remove(model) }
-            do {
-                let url = URL(string: "\(Self.baseURL)/api/pull")!
-                var req = URLRequest(url: url)
-                req.httpMethod = "POST"
-                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                req.httpBody = try? JSONSerialization.data(withJSONObject: ["name": model, "stream": false])
-                req.timeoutInterval = 7200
-                _ = try await URLSession.shared.data(for: req)
-                await refresh()
-                print("[OllamaMonitor] Pulled \(model) successfully")
-            } catch {
-                print("[OllamaMonitor] Pull failed for \(model): \(error)")
-            }
-        }
     }
 }

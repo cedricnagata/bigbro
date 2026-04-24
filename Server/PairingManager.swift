@@ -84,14 +84,11 @@ final class PairingManager: ObservableObject {
 
         let alert = NSAlert()
         alert.messageText = "Missing Models"
-        alert.informativeText = "\(deviceName) requires: \(missing.joined(separator: ", ")).\n\nPull from Ollama now?"
-        alert.addButton(withTitle: "Pull")
-        alert.addButton(withTitle: "Later")
+        alert.informativeText = "\(deviceName) requires the following model\(missing.count == 1 ? "" : "s") that aren't downloaded in Ollama:\n\n\(missing.joined(separator: "\n"))\n\nOpen Ollama to download them."
+        alert.addButton(withTitle: "OK")
         alert.alertStyle = .informational
         NSApp.activate(ignoringOtherApps: true)
-        if alert.runModal() == .alertFirstButtonReturn {
-            for model in missing { monitor.pull(model) }
-        }
+        alert.runModal()
     }
 
     func remove(deviceId: String) {
