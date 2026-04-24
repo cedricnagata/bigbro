@@ -24,6 +24,7 @@ private struct GeneralSettingsTab: View {
             Section {
                 LabeledContent("Ollama") {
                     OllamaStatusView()
+                        .frame(maxWidth: .infinity, alignment: .trailing)
                 }
 
                 LabeledContent("Default Model") {
@@ -55,14 +56,41 @@ private struct GeneralSettingsTab: View {
 
 private struct OllamaStatusView: View {
     @EnvironmentObject var monitor: OllamaMonitor
+    @State private var expanded = false
 
     var body: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 8, height: 8)
-            Text(statusText)
-                .foregroundStyle(monitor.status == .unreachable ? .red : .primary)
+        if monitor.status == .running && !monitor.installedModels.isEmpty {
+            VStack(alignment: .trailing, spacing: 4) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Circle().fill(Color.green).frame(width: 8, height: 8)
+                        Text(statusText)
+                        Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .buttonStyle(.plain)
+
+                if expanded {
+                    ForEach(monitor.installedModels, id: \.self) { model in
+                        Text(model)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 1)
+                    }
+                }
+            }
+        } else {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 8, height: 8)
+                Text(statusText)
+                    .foregroundStyle(monitor.status == .unreachable ? .red : .primary)
+            }
         }
     }
 
