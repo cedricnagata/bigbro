@@ -89,9 +89,7 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
             let deviceId = message["deviceId"] as? String ?? ""
             let deviceName = message["deviceName"] as? String ?? "Unknown"
             print("[AppRouter] hello from deviceId=\(deviceId.prefix(8)) name='\(deviceName)'")
-            await MainActor.run {
-                Task { await self.pairingManager.handleHello(deviceId: deviceId, deviceName: deviceName, connectionId: connectionId, server: server) }
-            }
+            await pairingManager.handleHello(deviceId: deviceId, deviceName: deviceName, connectionId: connectionId, server: server)
             return
         }
 
