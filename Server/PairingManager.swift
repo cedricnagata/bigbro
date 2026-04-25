@@ -6,22 +6,31 @@ import AppKit
 final class PairingManager: ObservableObject {
     @Published var approvedDevices: Set<String> = []
     @Published var deviceNames: [String: String] = [:]
+    @Published var deviceAppNames: [String: String] = [:]
     @Published var connectedDeviceIds: Set<String> = []
 
     weak var peerServer: PeerServer?
     weak var ollamaMonitor: OllamaMonitor?
 
+    @Published var deviceRequiredModels: [String: [String]] = [:]
+
     private static let approvedDevicesKey = "bigbro.approvedDevices"
     private static let deviceNamesKey = "bigbro.deviceNames"
+    private static let deviceAppNamesKey = "bigbro.deviceAppNames"
 
     init() {
         approvedDevices = Set(UserDefaults.standard.stringArray(forKey: Self.approvedDevicesKey) ?? [])
         deviceNames = (UserDefaults.standard.dictionary(forKey: Self.deviceNamesKey) as? [String: String]) ?? [:]
+        deviceAppNames = (UserDefaults.standard.dictionary(forKey: Self.deviceAppNamesKey) as? [String: String]) ?? [:]
         print("[PairingManager] Loaded \(approvedDevices.count) approved device(s)")
     }
 
     func displayName(for deviceId: String) -> String {
-        deviceNames[deviceId] ?? deviceId
+        let device = deviceNames[deviceId] ?? deviceId
+        if let app = deviceAppNames[deviceId] {
+            return "\(device) • \(app)"
+        }
+        return device
     }
 
     func markConnected(_ deviceId: String) {
@@ -31,14 +40,15 @@ final class PairingManager: ObservableObject {
 
     func markDisconnected(_ deviceId: String) {
         connectedDeviceIds.remove(deviceId)
+        deviceRequiredModels.removeValue(forKey: deviceId)
         print("[PairingManager] \(deviceId.prefix(8)) marked disconnected (total: \(connectedDeviceIds.count))")
     }
 
     /// Called by AppRouter on each hello message.
     /// Registers the connection (auto-approve known, show alert for new).
     /// Returns true if approved.
-    func handleHello(deviceId: String, deviceName: String, requiredModels: [String], connectionId: UUID, server: PeerServer) async {
-        print("[PairingManager] handleHello: deviceId=\(deviceId.prefix(8)) name='\(deviceName)' connectionId=\(connectionId)")
+    func handleHello(deviceId: String, deviceName: String, appName: String, requiredModels: [String], connectionId: UUID, server: PeerServer) async {
+        print("[PairingManager] handleHello: deviceId=\(deviceId.prefix(8)) name='\(deviceName)' app='\(appName)' connectionId=\(connectionId)")
 
         if approvedDevices.contains(deviceId) {
             print("[PairingManager] Device \(deviceId.prefix(8)) is already approved, auto-approving")
@@ -46,11 +56,19 @@ final class PairingManager: ObservableObject {
                 deviceNames[deviceId] = deviceName
                 persistNames()
             }
+            if deviceAppNames[deviceId] != appName {
+                deviceAppNames[deviceId] = appName
+                persistAppNames()
+            }
+            deviceRequiredModels[deviceId] = requiredModels
             markConnected(deviceId)
             await server.register(connectionId: connectionId, as: deviceId)
-            await server.send(["type": "helloAck", "status": "approved"], to: deviceId)
-            print("[PairingManager] helloAck(approved) sent to \(deviceId.prefix(8))")
-            promptModelDownloadIfNeeded(deviceName: deviceName, requiredModels: requiredModels)
+            let missing = missingModels(requiredModels: requiredModels)
+            var ack: [String: Any] = ["type": "helloAck", "status": "approved"]
+            if !missing.isEmpty { ack["missingModels"] = missing }
+            await server.send(ack, to: deviceId)
+            print("[PairingManager] helloAck(approved) sent to \(deviceId.prefix(8)), missing=\(missing)")
+            promptModelDownloadIfNeeded(deviceName: deviceName, missing: missing)
             return
         }
 
@@ -61,13 +79,19 @@ final class PairingManager: ObservableObject {
         if approved {
             approvedDevices.insert(deviceId)
             deviceNames[deviceId] = deviceName
+            deviceAppNames[deviceId] = appName
+            deviceRequiredModels[deviceId] = requiredModels
             persistApproved()
             persistNames()
+            persistAppNames()
             markConnected(deviceId)
             await server.register(connectionId: connectionId, as: deviceId)
-            await server.send(["type": "helloAck", "status": "approved"], to: deviceId)
-            print("[PairingManager] helloAck(approved) sent to \(deviceId.prefix(8))")
-            promptModelDownloadIfNeeded(deviceName: deviceName, requiredModels: requiredModels)
+            let missing = missingModels(requiredModels: requiredModels)
+            var ack: [String: Any] = ["type": "helloAck", "status": "approved"]
+            if !missing.isEmpty { ack["missingModels"] = missing }
+            await server.send(ack, to: deviceId)
+            print("[PairingManager] helloAck(approved) sent to \(deviceId.prefix(8)), missing=\(missing)")
+            promptModelDownloadIfNeeded(deviceName: deviceName, missing: missing)
         } else {
             await server.send(["type": "helloAck", "status": "denied"], toPending: connectionId)
             await server.disconnectPending(connectionId: connectionId)
@@ -75,11 +99,12 @@ final class PairingManager: ObservableObject {
         }
     }
 
-    private func promptModelDownloadIfNeeded(deviceName: String, requiredModels: [String]) {
-        guard let monitor = ollamaMonitor,
-              monitor.status == .running,
-              !requiredModels.isEmpty else { return }
-        let missing = monitor.missingModels(from: requiredModels)
+    private func missingModels(requiredModels: [String]) -> [String] {
+        guard let monitor = ollamaMonitor, monitor.status == .running else { return [] }
+        return monitor.missingModels(from: requiredModels)
+    }
+
+    private func promptModelDownloadIfNeeded(deviceName: String, missing: [String]) {
         guard !missing.isEmpty else { return }
 
         let alert = NSAlert()
@@ -96,9 +121,11 @@ final class PairingManager: ObservableObject {
         Task { await peerServer?.disconnect(deviceId: deviceId) }
         approvedDevices.remove(deviceId)
         deviceNames.removeValue(forKey: deviceId)
+        deviceAppNames.removeValue(forKey: deviceId)
         connectedDeviceIds.remove(deviceId)
         persistApproved()
         persistNames()
+        persistAppNames()
     }
 
     func removeAll() {
@@ -108,9 +135,11 @@ final class PairingManager: ObservableObject {
         }
         approvedDevices.removeAll()
         deviceNames.removeAll()
+        deviceAppNames.removeAll()
         connectedDeviceIds.removeAll()
         persistApproved()
         persistNames()
+        persistAppNames()
     }
 
     func disconnect(deviceId: String) {
@@ -126,6 +155,19 @@ final class PairingManager: ObservableObject {
         }
     }
 
+    /// Called when Ollama's installed model list changes. Pushes updated missing-model
+    /// lists to all connected devices that declared required models.
+    func pushModelsUpdate() {
+        guard let server = peerServer else { return }
+        for deviceId in connectedDeviceIds {
+            guard let required = deviceRequiredModels[deviceId], !required.isEmpty else { continue }
+            let missing = missingModels(requiredModels: required)
+            let msg: [String: Any] = ["type": "modelsUpdate", "missingModels": missing]
+            Task { await server.send(msg, to: deviceId) }
+            print("[PairingManager] modelsUpdate → \(deviceId.prefix(8)): missing=\(missing)")
+        }
+    }
+
     // MARK: - Private
 
     private func persistApproved() {
@@ -134,6 +176,10 @@ final class PairingManager: ObservableObject {
 
     private func persistNames() {
         UserDefaults.standard.set(deviceNames, forKey: Self.deviceNamesKey)
+    }
+
+    private func persistAppNames() {
+        UserDefaults.standard.set(deviceAppNames, forKey: Self.deviceAppNamesKey)
     }
 
     private func showApprovalAlert(deviceName: String) -> Bool {

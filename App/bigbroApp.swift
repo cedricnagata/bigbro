@@ -47,12 +47,19 @@ final class AppModel: ObservableObject {
     private let server = PeerServer()
     private let advertiser = BonjourAdvertiser()
     private let router: AppRouter  // must be retained — delegate is weak
+    private var cancellables: Set<AnyCancellable> = []
 
     init() {
         router = AppRouter(pairingManager: pairingManager, ollamaMonitor: ollamaMonitor)
         pairingManager.peerServer = server
         pairingManager.ollamaMonitor = ollamaMonitor
         ollamaMonitor.start()
+
+        ollamaMonitor.$installedModels
+            .dropFirst()
+            .sink { [weak self] _ in self?.pairingManager.pushModelsUpdate() }
+            .store(in: &cancellables)
+
         Task {
             await server.setDelegate(router)
             do {
@@ -96,9 +103,10 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         if type == "hello" {
             let deviceId = message["deviceId"] as? String ?? ""
             let deviceName = message["deviceName"] as? String ?? "Unknown"
+            let appName = message["appName"] as? String ?? "Unknown App"
             let requiredModels = message["requiredModels"] as? [String] ?? []
-            print("[AppRouter] hello from deviceId=\(deviceId.prefix(8)) name='\(deviceName)' requiredModels=\(requiredModels)")
-            await pairingManager.handleHello(deviceId: deviceId, deviceName: deviceName, requiredModels: requiredModels, connectionId: connectionId, server: server)
+            print("[AppRouter] hello from deviceId=\(deviceId.prefix(8)) name='\(deviceName)' app='\(appName)' requiredModels=\(requiredModels)")
+            await pairingManager.handleHello(deviceId: deviceId, deviceName: deviceName, appName: appName, requiredModels: requiredModels, connectionId: connectionId, server: server)
             return
         }
 

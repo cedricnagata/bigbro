@@ -162,22 +162,32 @@ private struct DevicesSettingsTab: View {
 
 private struct DeviceRow: View {
     @EnvironmentObject var pairingManager: PairingManager
+    @EnvironmentObject var ollamaMonitor: OllamaMonitor
     let deviceId: String
 
     var body: some View {
         let connected = pairingManager.connectedDeviceIds.contains(deviceId)
+        let requiredModels = pairingManager.deviceRequiredModels[deviceId] ?? []
         HStack(spacing: 10) {
             Circle()
                 .fill(connected ? Color.green : Color.secondary.opacity(0.35))
                 .frame(width: 10, height: 10)
             Image(systemName: "iphone")
                 .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(pairingManager.displayName(for: deviceId))
                     .lineLimit(1)
                 Text(connected ? "Connected" : "Disconnected")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if connected && !requiredModels.isEmpty {
+                    ForEach(requiredModels, id: \.self) { model in
+                        let installed = ollamaMonitor.isInstalled(model)
+                        Label(model, systemImage: installed ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(installed ? .green : .red)
+                    }
+                }
             }
             Spacer()
             if connected {
