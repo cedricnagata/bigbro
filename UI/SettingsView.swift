@@ -163,18 +163,21 @@ private struct DevicesSettingsTab: View {
 private struct DeviceRow: View {
     @EnvironmentObject var pairingManager: PairingManager
     @EnvironmentObject var ollamaMonitor: OllamaMonitor
+    @EnvironmentObject var modelDownloader: ModelDownloader
     let deviceId: String
 
     var body: some View {
         let connected = pairingManager.connectedDeviceIds.contains(deviceId)
         let requiredModels = pairingManager.deviceRequiredModels[deviceId] ?? []
-        HStack(spacing: 10) {
+        HStack(alignment: .top, spacing: 10) {
             Circle()
                 .fill(connected ? Color.green : Color.secondary.opacity(0.35))
                 .frame(width: 10, height: 10)
+                .padding(.top, 4)
             Image(systemName: "iphone")
                 .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 3) {
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 6) {
                 Text(pairingManager.displayName(for: deviceId))
                     .lineLimit(1)
                 Text(connected ? "Connected" : "Disconnected")
@@ -182,25 +185,80 @@ private struct DeviceRow: View {
                     .foregroundStyle(.secondary)
                 if connected && !requiredModels.isEmpty {
                     ForEach(requiredModels, id: \.self) { model in
-                        let installed = ollamaMonitor.isInstalled(model)
-                        Label(model, systemImage: installed ? "checkmark.circle.fill" : "xmark.circle.fill")
-                            .font(.caption)
-                            .foregroundStyle(installed ? .green : .red)
+                        ModelStatusRow(model: model)
                     }
                 }
             }
             Spacer()
-            if connected {
-                Button("Disconnect") {
-                    pairingManager.disconnect(deviceId: deviceId)
+            VStack(spacing: 6) {
+                if connected {
+                    Button("Disconnect") {
+                        pairingManager.disconnect(deviceId: deviceId)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                Button("Remove") {
+                    pairingManager.remove(deviceId: deviceId)
                 }
                 .buttonStyle(.bordered)
+                .tint(.red)
             }
-            Button("Remove") {
-                pairingManager.remove(deviceId: deviceId)
-            }
-            .buttonStyle(.bordered)
-            .tint(.red)
         }
+    }
+}
+
+private struct ModelStatusRow: View {
+    @EnvironmentObject var ollamaMonitor: OllamaMonitor
+    @EnvironmentObject var modelDownloader: ModelDownloader
+    let model: String
+
+    var body: some View {
+        let installed = ollamaMonitor.isInstalled(model)
+        let progress = modelDownloader.progress[model]
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Image(systemName: installed ? "checkmark.circle.fill" : (progress != nil ? "arrow.down.circle" : "xmark.circle.fill"))
+                    .foregroundStyle(installed ? .green : (progress != nil ? .blue : .red))
+                Text(model)
+                    .font(.caption)
+                Spacer(minLength: 8)
+                if !installed && progress == nil {
+                    Button("Download") {
+                        modelDownloader.startDownload(model)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                }
+            }
+            if let progress {
+                if let err = progress.error {
+                    Text("Error: \(err)")
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                } else {
+                    ProgressView(value: progress.percent)
+                        .progressViewStyle(.linear)
+                        .controlSize(.mini)
+                    Text(progressLabel(progress))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func progressLabel(_ p: ModelDownloader.Progress) -> String {
+        if p.bytesTotal > 0 {
+            let pct = Int((p.percent * 100).rounded())
+            return "\(p.status) — \(pct)% (\(formatBytes(p.bytesCompleted))/\(formatBytes(p.bytesTotal)))"
+        }
+        return p.status
+    }
+
+    private func formatBytes(_ bytes: Int64) -> String {
+        let f = ByteCountFormatter()
+        f.allowedUnits = [.useMB, .useGB]
+        f.countStyle = .file
+        return f.string(fromByteCount: bytes)
     }
 }

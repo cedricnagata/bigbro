@@ -11,6 +11,7 @@ final class PairingManager: ObservableObject {
 
     weak var peerServer: PeerServer?
     weak var ollamaMonitor: OllamaMonitor?
+    weak var modelDownloader: ModelDownloader?
 
     @Published var deviceRequiredModels: [String: [String]] = [:]
 
@@ -109,11 +110,16 @@ final class PairingManager: ObservableObject {
 
         let alert = NSAlert()
         alert.messageText = "Missing Models"
-        alert.informativeText = "\(deviceName) requires the following model\(missing.count == 1 ? "" : "s") that aren't downloaded in Ollama:\n\n\(missing.joined(separator: "\n"))\n\nOpen Ollama to download them."
-        alert.addButton(withTitle: "OK")
+        alert.informativeText = "\(deviceName) requires the following model\(missing.count == 1 ? "" : "s") that aren't downloaded in Ollama:\n\n\(missing.joined(separator: "\n"))"
+        alert.addButton(withTitle: "Download All")
+        alert.addButton(withTitle: "Later")
         alert.alertStyle = .informational
         NSApp.activate(ignoringOtherApps: true)
-        alert.runModal()
+        if alert.runModal() == .alertFirstButtonReturn {
+            for model in missing {
+                modelDownloader?.startDownload(model)
+            }
+        }
     }
 
     func remove(deviceId: String) {
@@ -165,6 +171,28 @@ final class PairingManager: ObservableObject {
             let msg: [String: Any] = ["type": "modelsUpdate", "missingModels": missing]
             Task { await server.send(msg, to: deviceId) }
             print("[PairingManager] modelsUpdate → \(deviceId.prefix(8)): missing=\(missing)")
+        }
+    }
+
+    /// Broadcasts a model download progress update to every connected peer.
+    /// Sent for every download — peers can decide which to surface based on
+    /// what they care about.
+    func broadcastDownloadProgress(model: String, progress: ModelDownloader.Progress) {
+        guard let server = peerServer else { return }
+        let type = progress.done ? "modelDownloadComplete" : "modelDownloadProgress"
+        var msg: [String: Any] = [
+            "type": type,
+            "model": model,
+            "status": progress.status,
+            "completed": progress.bytesCompleted,
+            "total": progress.bytesTotal,
+        ]
+        if progress.done {
+            msg["success"] = (progress.error == nil)
+            if let err = progress.error { msg["error"] = err }
+        }
+        for deviceId in connectedDeviceIds {
+            Task { await server.send(msg, to: deviceId) }
         }
     }
 

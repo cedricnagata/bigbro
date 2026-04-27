@@ -12,6 +12,7 @@ struct BigBroApp: App {
             DeviceListView()
                 .environmentObject(appModel.pairingManager)
                 .environmentObject(appModel.ollamaMonitor)
+                .environmentObject(appModel.modelDownloader)
                 .onAppear { appDelegate.appModel = appModel }
         }
 
@@ -19,6 +20,7 @@ struct BigBroApp: App {
             SettingsView()
                 .environmentObject(appModel.pairingManager)
                 .environmentObject(appModel.ollamaMonitor)
+                .environmentObject(appModel.modelDownloader)
         }
     }
 }
@@ -44,20 +46,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 final class AppModel: ObservableObject {
     let pairingManager = PairingManager()
     let ollamaMonitor = OllamaMonitor()
+    let modelDownloader = ModelDownloader()
     private let server = PeerServer()
     private let advertiser = BonjourAdvertiser()
     private let router: AppRouter  // must be retained — delegate is weak
     private var cancellables: Set<AnyCancellable> = []
 
     init() {
-        router = AppRouter(pairingManager: pairingManager, ollamaMonitor: ollamaMonitor)
+        router = AppRouter(pairingManager: pairingManager, ollamaMonitor: ollamaMonitor, modelDownloader: modelDownloader)
         pairingManager.peerServer = server
         pairingManager.ollamaMonitor = ollamaMonitor
+        pairingManager.modelDownloader = modelDownloader
         ollamaMonitor.start()
 
         ollamaMonitor.$installedModels
             .dropFirst()
-            .sink { [weak self] _ in self?.pairingManager.pushModelsUpdate() }
+            .sink { [weak self] _ in
+                self?.pairingManager.pushModelsUpdate()
+            }
+            .store(in: &cancellables)
+
+        modelDownloader.updates
+            .sink { [weak self] update in
+                self?.pairingManager.broadcastDownloadProgress(model: update.model, progress: update.progress)
+                if update.progress.done && update.progress.error == nil {
+                    // Refresh installed model list so connected peers' missingModels updates.
+                    Task { await self?.ollamaMonitor.refresh() }
+                }
+            }
             .store(in: &cancellables)
 
         Task {
@@ -85,12 +101,14 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
     private let pairingManager: PairingManager
     private let inferenceProxy = InferenceProxy()
     private let ollamaMonitor: OllamaMonitor
+    private let modelDownloader: ModelDownloader
     private let powerAssertion = PowerAssertion()
     weak var server: PeerServer?
 
-    init(pairingManager: PairingManager, ollamaMonitor: OllamaMonitor) {
+    init(pairingManager: PairingManager, ollamaMonitor: OllamaMonitor, modelDownloader: ModelDownloader) {
         self.pairingManager = pairingManager
         self.ollamaMonitor = ollamaMonitor
+        self.modelDownloader = modelDownloader
         print("[AppRouter] Initialized")
     }
 
@@ -147,6 +165,25 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         await MainActor.run { powerAssertion.release() }
     }
 
+    // MARK: - Missing-model handling
+
+    private func handleMissingModel(_ model: String, requestId: String, deviceId: String, server: PeerServer) async {
+        let alreadyInProgress = await MainActor.run { modelDownloader.isDownloading(model) }
+        if !alreadyInProgress {
+            print("[AppRouter] Model '\(model)' missing — starting download for \(deviceId.prefix(8))")
+            await MainActor.run { modelDownloader.startDownload(model) }
+        } else {
+            print("[AppRouter] Model '\(model)' already downloading — informing \(deviceId.prefix(8))")
+        }
+        await server.send([
+            "type": "modelDownloading",
+            "requestId": requestId,
+            "model": model,
+            "alreadyInProgress": alreadyInProgress,
+        ], to: deviceId)
+        await server.send(["type": "done", "requestId": requestId], to: deviceId)
+    }
+
     // MARK: - Request handlers
 
     private func handleRequest(_ message: [String: Any], server: PeerServer, deviceId: String) async {
@@ -169,11 +206,8 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
             model?.isEmpty == false ? model! : AppSettings.shared.defaultModel
         }
         let modelInstalled = await MainActor.run { ollamaMonitor.isInstalled(resolvedModel) }
-        guard modelInstalled else {
-            print("[AppRouter] Model '\(resolvedModel)' not installed, returning error")
-            await server.send(["type": "error", "requestId": requestId,
-                               "message": "Model '\(resolvedModel)' is not downloaded in Ollama. Open Ollama to download it first."],
-                              to: deviceId)
+        if !modelInstalled {
+            await handleMissingModel(resolvedModel, requestId: requestId, deviceId: deviceId, server: server)
             return
         }
 
@@ -256,11 +290,8 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
             model?.isEmpty == false ? model! : AppSettings.shared.defaultModel
         }
         let modelInstalled = await MainActor.run { ollamaMonitor.isInstalled(resolvedModel) }
-        guard modelInstalled else {
-            print("[AppRouter] Model '\(resolvedModel)' not installed, returning error")
-            await server.send(["type": "error", "requestId": requestId,
-                               "message": "Model '\(resolvedModel)' is not downloaded in Ollama. Open Ollama to download it first."],
-                              to: deviceId)
+        if !modelInstalled {
+            await handleMissingModel(resolvedModel, requestId: requestId, deviceId: deviceId, server: server)
             return
         }
 
