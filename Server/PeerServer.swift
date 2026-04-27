@@ -4,6 +4,8 @@ import Network
 protocol PeerServerDelegate: AnyObject, Sendable {
     func peerServer(_ server: PeerServer, didReceive message: [String: Any], connectionId: UUID) async
     func peerServer(_ server: PeerServer, didDisconnectPeer deviceId: String) async
+    func peerServer(_ server: PeerServer, didConnectFirstPeer deviceId: String) async
+    func peerServer(_ server: PeerServer, didDisconnectLastPeer deviceId: String) async
 }
 
 actor PeerServer {
@@ -51,15 +53,19 @@ actor PeerServer {
         stop()
     }
 
-    func register(connectionId: UUID, as deviceId: String) {
+    func register(connectionId: UUID, as deviceId: String) async {
         guard let conn = pending[connectionId] else {
             print("[PeerServer] register: no pending connection for \(connectionId)")
             return
         }
+        let wasEmpty = peers.isEmpty
         pending.removeValue(forKey: connectionId)
         peers[deviceId] = conn
         connectionIds[connectionId] = deviceId
         print("[PeerServer] Registered connection \(connectionId) as device \(deviceId.prefix(8))")
+        if wasEmpty {
+            await delegate?.peerServer(self, didConnectFirstPeer: deviceId)
+        }
     }
 
     func deviceId(for connectionId: UUID) -> String? {
@@ -94,6 +100,9 @@ actor PeerServer {
         peers.removeValue(forKey: deviceId)
         lastHeard.removeValue(forKey: deviceId)
         // connectionIds left intact so readLoop can detect closure and call didDisconnectPeer
+        if peers.isEmpty {
+            await delegate?.peerServer(self, didDisconnectLastPeer: deviceId)
+        }
     }
 
     func send(_ message: [String: Any], toPending connectionId: UUID) async {
@@ -146,6 +155,9 @@ actor PeerServer {
             lastHeard.removeValue(forKey: deviceId)
             print("[PeerServer] Device \(deviceId.prefix(8)) disconnected via viability loss")
             await delegate?.peerServer(self, didDisconnectPeer: deviceId)
+            if peers.isEmpty {
+                await delegate?.peerServer(self, didDisconnectLastPeer: deviceId)
+            }
         }
     }
 
@@ -189,6 +201,9 @@ actor PeerServer {
             lastHeard.removeValue(forKey: deviceId)
             print("[PeerServer] Device \(deviceId.prefix(8)) disconnected")
             await delegate?.peerServer(self, didDisconnectPeer: deviceId)
+            if peers.isEmpty {
+                await delegate?.peerServer(self, didDisconnectLastPeer: deviceId)
+            }
         } else {
             print("[PeerServer] Pending connection \(connectionId) closed before hello")
         }

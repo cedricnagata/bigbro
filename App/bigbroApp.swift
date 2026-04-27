@@ -85,6 +85,7 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
     private let pairingManager: PairingManager
     private let inferenceProxy = InferenceProxy()
     private let ollamaMonitor: OllamaMonitor
+    private let powerAssertion = PowerAssertion()
     weak var server: PeerServer?
 
     init(pairingManager: PairingManager, ollamaMonitor: OllamaMonitor) {
@@ -134,6 +135,16 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
     func peerServer(_ server: PeerServer, didDisconnectPeer deviceId: String) async {
         print("[AppRouter] Peer disconnected: \(deviceId.prefix(8))")
         await MainActor.run { pairingManager.markDisconnected(deviceId) }
+    }
+
+    func peerServer(_ server: PeerServer, didConnectFirstPeer deviceId: String) async {
+        print("[AppRouter] First peer connected: \(deviceId.prefix(8)) — acquiring power assertion")
+        await MainActor.run { powerAssertion.acquire(reason: "bigbro: peer connected") }
+    }
+
+    func peerServer(_ server: PeerServer, didDisconnectLastPeer deviceId: String) async {
+        print("[AppRouter] Last peer disconnected: \(deviceId.prefix(8)) — releasing power assertion")
+        await MainActor.run { powerAssertion.release() }
     }
 
     // MARK: - Request handlers
