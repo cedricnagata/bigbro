@@ -6,7 +6,5 @@
 	<array>
 		<string>_bigbro._tcp</string>
 	</array>
-	<key>LSApplicationCategoryType</key>
-	<string>public.app-category.developer-tools</string>
 </dict>
 </plist>
