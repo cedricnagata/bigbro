@@ -14,7 +14,7 @@ BigBro advertises itself on the local network via Bonjour, accepts pairing reque
 
 ## Requirements
 
-- macOS 13 or later
+- macOS 14 Sonoma or later
 - [Ollama](https://ollama.ai) running locally
 
 ## Installation
