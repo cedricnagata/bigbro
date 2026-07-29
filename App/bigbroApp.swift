@@ -56,7 +56,8 @@ final class AppModel: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
 
     init() {
-        router = AppRouter(pairingManager: pairingManager, ollamaMonitor: ollamaMonitor, modelDownloader: modelDownloader)
+        router = AppRouter(pairingManager: pairingManager, ollamaMonitor: ollamaMonitor,
+                           speechMonitor: speechMonitor, modelDownloader: modelDownloader)
         pairingManager.peerServer = server
         pairingManager.ollamaMonitor = ollamaMonitor
         pairingManager.modelDownloader = modelDownloader
@@ -115,13 +116,20 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
     private let pairingManager: PairingManager
     private let proxy = OpenAIProxy()
     private let ollamaMonitor: OllamaMonitor
+    private let speechMonitor: SpeechMonitor
     private let modelDownloader: ModelDownloader
     private let powerAssertion = PowerAssertion()
     weak var server: PeerServer?
 
-    init(pairingManager: PairingManager, ollamaMonitor: OllamaMonitor, modelDownloader: ModelDownloader) {
+    init(
+        pairingManager: PairingManager,
+        ollamaMonitor: OllamaMonitor,
+        speechMonitor: SpeechMonitor,
+        modelDownloader: ModelDownloader
+    ) {
         self.pairingManager = pairingManager
         self.ollamaMonitor = ollamaMonitor
+        self.speechMonitor = speechMonitor
         self.modelDownloader = modelDownloader
         print("[AppRouter] Initialized")
     }
@@ -155,6 +163,12 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         case "generateRequest":
             print("[AppRouter] generateRequest from \(deviceId.prefix(8))")
             await handleGenerateRequest(message, server: server, deviceId: deviceId)
+        case "speechRequest":
+            print("[AppRouter] speechRequest from \(deviceId.prefix(8))")
+            await handleSpeechRequest(message, server: server, deviceId: deviceId)
+        case "transcribeRequest":
+            print("[AppRouter] transcribeRequest from \(deviceId.prefix(8))")
+            await handleTranscribeRequest(message, server: server, deviceId: deviceId)
         case "bye":
             print("[AppRouter] bye from \(deviceId.prefix(8)), marking disconnected")
             await MainActor.run { pairingManager.markDisconnected(deviceId) }
@@ -358,6 +372,132 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
             print("[AppRouter] done sent for \(requestId.prefix(8))")
         } catch {
             print("[AppRouter] Generate error for \(requestId.prefix(8)): \(error)")
+            await server.send(["type": "error", "requestId": requestId, "message": error.localizedDescription], to: deviceId)
+        }
+    }
+
+    // MARK: - Speech handlers
+
+    /// Cap on an uploaded utterance after base64 decoding. Rejecting an oversized upload
+    /// beats buffering it unboundedly.
+    private static let maxUploadBytes = 10 * 1024 * 1024
+
+    /// Speech requests are gated on the backend being enabled and reachable — and
+    /// deliberately *not* on model-list membership, the way `handleRequest` gates chat.
+    /// Some servers happily accept models they do not list, so gating there would produce
+    /// false negatives; a 4xx from the backend surfaces as a clean error instead.
+    private func speechReady(requestId: String, deviceId: String, server: PeerServer) async -> Bool {
+        let (enabled, status) = await MainActor.run {
+            (AppSettings.shared.speechEnabled, speechMonitor.status)
+        }
+        if !enabled {
+            await fail(requestId, "Speech is not enabled in BigBro Settings.", deviceId: deviceId, server: server)
+            return false
+        }
+        if status != .running {
+            await fail(requestId, "Speech backend not reachable at \(AppSettings.speechBaseURL).",
+                       deviceId: deviceId, server: server)
+            return false
+        }
+        return true
+    }
+
+    private func fail(_ requestId: String, _ message: String, deviceId: String, server: PeerServer) async {
+        print("[AppRouter] \(requestId.prefix(8)): \(message)")
+        await server.send(["type": "error", "requestId": requestId, "message": message], to: deviceId)
+    }
+
+    private func handleSpeechRequest(_ message: [String: Any], server: PeerServer, deviceId: String) async {
+        guard let requestId = message["requestId"] as? String,
+              let input = message["input"] as? String else {
+            print("[AppRouter] handleSpeechRequest: missing requestId or input")
+            return
+        }
+        guard await speechReady(requestId: requestId, deviceId: deviceId, server: server) else { return }
+
+        let voice  = message["voice"] as? String
+        let model  = message["model"] as? String
+        let format = message["response_format"] as? String
+        let speed  = message["speed"] as? Double
+
+        let resolved = await MainActor.run { () -> (format: String, voice: String, model: String) in
+            let s = AppSettings.shared
+            return (format ?? s.ttsFormat, voice ?? s.ttsVoice, model ?? s.ttsModel)
+        }
+
+        do {
+            // Headerless PCM describes nothing about itself, so the client is told the
+            // format up front — it needs the rate and channel count to configure playback
+            // before the first chunk lands.
+            await server.send([
+                "type": "audioStart",
+                "requestId": requestId,
+                "format": resolved.format,
+                "sampleRate": 24_000,  // OpenAI's pcm rate; containers carry their own
+                "channels": 1,
+                "model": resolved.model,
+                "voice": resolved.voice,
+            ], to: deviceId)
+
+            var seq = 0
+            for try await chunk in proxy.synthesize(input: input, voice: voice, model: model,
+                                                    responseFormat: format, speed: speed) {
+                guard await server.isConnected(deviceId: deviceId) else {
+                    print("[AppRouter] Peer \(deviceId.prefix(8)) gone, abandoning speech \(requestId.prefix(8))")
+                    return
+                }
+                await server.send([
+                    "type": "audioChunk",
+                    "requestId": requestId,
+                    "audio": chunk.base64EncodedString(),
+                    "seq": seq,
+                ], to: deviceId)
+                seq += 1
+            }
+            print("[AppRouter] Speech complete for \(requestId.prefix(8)): \(seq) chunk(s)")
+            await server.send(["type": "done", "requestId": requestId], to: deviceId)
+        } catch {
+            print("[AppRouter] Speech error for \(requestId.prefix(8)): \(error)")
+            await server.send(["type": "error", "requestId": requestId, "message": error.localizedDescription], to: deviceId)
+        }
+    }
+
+    private func handleTranscribeRequest(_ message: [String: Any], server: PeerServer, deviceId: String) async {
+        guard let requestId = message["requestId"] as? String,
+              let base64 = message["audio"] as? String else {
+            print("[AppRouter] handleTranscribeRequest: missing requestId or audio")
+            return
+        }
+        guard await speechReady(requestId: requestId, deviceId: deviceId, server: server) else { return }
+
+        guard let audio = Data(base64Encoded: base64) else {
+            await fail(requestId, "Audio payload was not valid base64.", deviceId: deviceId, server: server)
+            return
+        }
+        guard audio.count <= Self.maxUploadBytes else {
+            let mb = Self.maxUploadBytes / 1_048_576
+            await fail(requestId, "Audio exceeds the \(mb) MB upload limit.", deviceId: deviceId, server: server)
+            return
+        }
+
+        let format   = message["audioFormat"] as? String ?? "wav"
+        let model    = message["model"] as? String
+        let language = message["language"] as? String
+
+        do {
+            let result = try await proxy.transcribe(audio: audio, format: format,
+                                                    model: model, language: language)
+            print("[AppRouter] Transcript for \(requestId.prefix(8)): \(result.text.count) chars")
+            var reply: [String: Any] = [
+                "type": "transcript",
+                "requestId": requestId,
+                "text": result.text,
+            ]
+            if let language = result.language { reply["language"] = language }
+            await server.send(reply, to: deviceId)
+            await server.send(["type": "done", "requestId": requestId], to: deviceId)
+        } catch {
+            print("[AppRouter] Transcribe error for \(requestId.prefix(8)): \(error)")
             await server.send(["type": "error", "requestId": requestId, "message": error.localizedDescription], to: deviceId)
         }
     }

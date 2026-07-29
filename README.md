@@ -63,6 +63,8 @@ BigBro uses a custom framed TCP protocol on port 8765. Each message is a 4-byte 
 | `hello` | `deviceId`, `deviceName`, `appName`, `requiredModels?` | Initiate pairing |
 | `request` | `requestId`, `messages`, `streaming`, `tools?`, `model?`, `format?`, `options?`, `think?`, `keep_alive?` | Chat request → `/v1/chat/completions` |
 | `generateRequest` | `requestId`, `prompt`, `streaming`, `images?`, `suffix?`, `system?`, `template?`, `model?`, `format?`, `options?`, `raw?`, `think?`, `keep_alive?` | Single-turn generate → `/v1/chat/completions` |
+| `speechRequest` | `requestId`, `input`, `voice?`, `model?`, `response_format?`, `speed?` | Text-to-speech → `/v1/audio/speech` |
+| `transcribeRequest` | `requestId`, `audio` (base64), `audioFormat?`, `model?`, `language?` | Speech-to-text → `/v1/audio/transcriptions`. Max 10 MB decoded |
 | `bye` | — | Clean disconnect |
 
 The wire format is unchanged from BigBro's Ollama-native days — the Mac translates it. `think` maps to `reasoning_effort`, `format` to `response_format`, `options` to their OpenAI equivalents, and message images to content parts. `template`, `raw` and `suffix` have no chat-completions equivalent and return an `error` rather than being silently dropped.
@@ -75,6 +77,9 @@ The wire format is unchanged from BigBro's Ollama-native days — the Mac transl
 | `chunk` | `requestId`, `delta` | Assistant text delta |
 | `thinking` | `requestId`, `delta` | Reasoning delta, kept separate from `chunk` so it is never spoken or shown as an answer |
 | `toolCall` | `requestId`, `calls` | Tool calls array (`request` only) |
+| `audioStart` | `requestId`, `format`, `sampleRate`, `channels`, `model`, `voice` | Precedes audio, so playback can be configured before the first chunk |
+| `audioChunk` | `requestId`, `audio` (base64), `seq` | Synthesized audio, ~8 KB per chunk |
+| `transcript` | `requestId`, `text`, `language?` | Transcription result |
 | `done` | `requestId` | Request complete |
 | `error` | `requestId`, `message` | Inference or upstream error |
 | `modelsUpdate` | `missingModels` | Pushed when the backend's model list changes |
@@ -96,17 +101,21 @@ bigbro/
 │   ├── bigbroApp.swift         — app entry, AppModel, AppRouter
 │   ├── AppSettings.swift       — backend URLs + default model (UserDefaults)
 │   ├── BackendStatus.swift     — BackendStatus enum, BackendStatusReporting protocol
-│   ├── OllamaMonitor.swift     — polls the backend every 5s, publishes installed models
-│   └── ModelDownloader.swift   — drives model pulls, publishes throttled progress
+│   ├── OllamaMonitor.swift     — polls the chat backend every 5s, publishes models
+│   ├── SpeechMonitor.swift     — polls the speech backend, publishes voices
+│   ├── ModelInstalling.swift   — install protocol + Ollama and LocalAI implementations
+│   └── ModelDownloader.swift   — coordinates installs, publishes throttled progress
 ├── Server/
 │   ├── PeerServer.swift        — TCP server (NWListener)
 │   ├── BonjourAdvertiser.swift — mDNS advertisement (_bigbro._tcp.)
 │   ├── PairingManager.swift    — device approval, persistence, required-model tracking
 │   └── PowerAssertion.swift    — keeps the Mac awake while peers are connected
 ├── Proxy/
-│   └── OpenAIProxy.swift       — OpenAI-compatible proxy (/v1/chat/completions, SSE)
+│   ├── OpenAIProxy.swift       — chat (SSE), speech, transcription
+│   └── MultipartBody.swift     — multipart writer for /v1/audio/transcriptions
 └── UI/
     ├── DeviceListView.swift     — menu bar device list with model status
     ├── BackendStatusView.swift  — reusable backend status indicator
-    └── SettingsView.swift       — settings tabs (backend status + devices)
+    ├── SpeechPreview.swift      — auditions a voice locally via AVAudioPlayer
+    └── SettingsView.swift       — settings tabs (backends + devices)
 ```
