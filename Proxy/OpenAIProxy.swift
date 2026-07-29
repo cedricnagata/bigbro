@@ -495,6 +495,62 @@ struct OpenAIProxy {
         return audio
     }
 
+    // MARK: - Transcription
+
+    /// Transcribes a complete utterance via `/v1/audio/transcriptions`.
+    ///
+    /// Batch rather than streaming: real-time transcription needs the Realtime API and a
+    /// persistent bidirectional session, which is a much larger change and unnecessary for
+    /// push-to-talk or voice-activity-delimited turns.
+    ///
+    /// This is the only request in the proxy that is not JSON — the endpoint takes
+    /// multipart/form-data.
+    func transcribe(
+        audio: Data,
+        format: String = "wav",
+        model: String? = nil,
+        language: String? = nil,
+        prompt: String? = nil,
+        temperature: Double? = nil
+    ) async throws -> (text: String, language: String?) {
+        let settings = AppSettings.shared
+        guard let url = settings.transcriptionsURL else {
+            throw InferenceError.invalidConfiguration
+        }
+
+        var body = MultipartBody()
+        body.addFile(
+            "file",
+            filename: "audio.\(format)",
+            contentType: MultipartBody.audioContentType(for: format),
+            fileData: audio
+        )
+        body.addField("model", model?.isEmpty == false ? model! : settings.sttModel)
+        body.addField("response_format", "json")
+        if let language    { body.addField("language", language) }
+        if let prompt      { body.addField("prompt", prompt) }
+        if let temperature { body.addField("temperature", String(temperature)) }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(body.contentType, forHTTPHeaderField: "Content-Type")
+        request.httpBody = body.finalize()
+        request.timeoutInterval = 300  // first request may lazily download the model
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response, data: data)
+
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let text = json["text"] as? String {
+            return (text, json["language"] as? String)
+        }
+        // Some servers answer with a bare string even when asked for json.
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw InferenceError.invalidResponse
+        }
+        return (text.trimmingCharacters(in: .whitespacesAndNewlines), nil)
+    }
+
     // MARK: - Generate
 
     /// Ollama's `/api/generate` has no OpenAI equivalent that preserves images or a system
