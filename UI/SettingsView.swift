@@ -18,11 +18,13 @@ struct SettingsView: View {
 private struct GeneralSettingsTab: View {
     @ObservedObject private var settings = AppSettings.shared
     @EnvironmentObject var ollamaMonitor: OllamaMonitor
+    @EnvironmentObject var speechMonitor: SpeechMonitor
+    @StateObject private var preview = SpeechPreview()
 
     var body: some View {
         Form {
             Section {
-                LabeledContent("Ollama") {
+                LabeledContent(AppSettings.chatBaseURL) {
                     BackendStatusView(monitor: ollamaMonitor)
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }
@@ -42,13 +44,85 @@ private struct GeneralSettingsTab: View {
                     .frame(maxWidth: .infinity, alignment: .trailing)
                 }
             } header: {
-                Text("Inference Backend")
+                Text("Text Generation")
             } footer: {
                 Label("Default model is used when the iOS app doesn't specify one.", systemImage: "info.circle")
                     .foregroundStyle(.secondary)
                     .font(.caption)
             }
 
+            Section {
+                Toggle("Enable speech", isOn: $settings.speechEnabled)
+
+                if settings.speechEnabled {
+                    LabeledContent(AppSettings.speechBaseURL) {
+                        BackendStatusView(monitor: speechMonitor)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+
+                    LabeledContent("Voice") {
+                        HStack(spacing: 6) {
+                            // Free-form rather than a closed list: voice names are not
+                            // standardised across backends (af_heart vs alloy vs
+                            // en_US-amy-medium), and not every backend can list them.
+                            TextField("", text: $settings.ttsVoice)
+                                .labelsHidden()
+                                .frame(maxWidth: .infinity)
+
+                            if !speechMonitor.availableVoices.isEmpty {
+                                Menu("Choose") {
+                                    ForEach(speechMonitor.availableVoices, id: \.self) { voice in
+                                        Button(voice) { settings.ttsVoice = voice }
+                                    }
+                                }
+                                .fixedSize()
+                            }
+
+                            Button(preview.isSynthesizing ? "…" : "Preview") {
+                                preview.play(voice: settings.ttsVoice)
+                            }
+                            .disabled(preview.isSynthesizing || speechMonitor.status != .running)
+                        }
+                    }
+
+                    LabeledContent("Speech Model") {
+                        TextField("", text: $settings.ttsModel)
+                            .labelsHidden()
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+
+                    LabeledContent("Audio Format") {
+                        Picker("Audio Format", selection: $settings.ttsFormat) {
+                            ForEach(["pcm", "wav", "mp3", "opus", "flac"], id: \.self) { format in
+                                Text(format).tag(format)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+
+                    LabeledContent("Transcription Model") {
+                        TextField("", text: $settings.sttModel)
+                            .labelsHidden()
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+
+                    if let error = preview.error {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
+            } header: {
+                Text("Speech")
+            } footer: {
+                Label(
+                    "Text-to-speech and transcription. Requires a server exposing /v1/audio/speech — LocalAI (port 8080) or Speaches (8000).",
+                    systemImage: "info.circle"
+                )
+                .foregroundStyle(.secondary)
+                .font(.caption)
+            }
         }
         .formStyle(.grouped)
     }

@@ -12,6 +12,7 @@ struct BigBroApp: App {
             DeviceListView()
                 .environmentObject(appModel.pairingManager)
                 .environmentObject(appModel.ollamaMonitor)
+                .environmentObject(appModel.speechMonitor)
                 .environmentObject(appModel.modelDownloader)
                 .onAppear { appDelegate.appModel = appModel }
         }
@@ -20,6 +21,7 @@ struct BigBroApp: App {
             SettingsView()
                 .environmentObject(appModel.pairingManager)
                 .environmentObject(appModel.ollamaMonitor)
+                .environmentObject(appModel.speechMonitor)
                 .environmentObject(appModel.modelDownloader)
         }
     }
@@ -46,6 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 final class AppModel: ObservableObject {
     let pairingManager = PairingManager()
     let ollamaMonitor = OllamaMonitor()
+    let speechMonitor = SpeechMonitor()
     let modelDownloader = ModelDownloader()
     private let server = PeerServer()
     private let advertiser = BonjourAdvertiser()
@@ -58,6 +61,16 @@ final class AppModel: ObservableObject {
         pairingManager.ollamaMonitor = ollamaMonitor
         pairingManager.modelDownloader = modelDownloader
         ollamaMonitor.start()
+        speechMonitor.start()
+
+        // The poll would pick this up within 5s anyway; refreshing on the toggle makes
+        // enabling speech feel immediate.
+        AppSettings.shared.$speechEnabled
+            .dropFirst()
+            .sink { [weak self] _ in
+                Task { @MainActor in await self?.speechMonitor.refresh() }
+            }
+            .store(in: &cancellables)
 
         ollamaMonitor.$installedModels
             .dropFirst()
@@ -91,6 +104,7 @@ final class AppModel: ObservableObject {
     func shutdown() async {
         print("[BigBro] Shutting down")
         ollamaMonitor.stop()
+        speechMonitor.stop()
         await server.shutdown()
     }
 }

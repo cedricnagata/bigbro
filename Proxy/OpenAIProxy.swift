@@ -385,6 +385,116 @@ struct OpenAIProxy {
         return try await sendOnce(jsonPOSTRequest(url: url, body: body))
     }
 
+    // MARK: - Speech synthesis
+
+    /// Bytes are buffered to roughly this size before being yielded, so the caller sends a
+    /// reasonable number of frames rather than one per network read.
+    private static let audioChunkBytes = 8 * 1024
+
+    /// ...and flushed at least this often regardless, so a backend that pauses between
+    /// sentences does not leave a partial buffer stranded.
+    private static let audioFlushInterval: TimeInterval = 0.25
+
+    /// Streams synthesized audio from `/v1/audio/speech`.
+    ///
+    /// `stream_format: "audio"` asks for raw chunked bytes. Backends that do not know the
+    /// flag ignore it and return the whole body instead, which this same reader handles with
+    /// no branching. `stream_format: "sse"` is deliberately not used: most local servers do
+    /// not implement it, and it would base64-encode audio that the peer protocol then
+    /// base64-encodes again.
+    func synthesize(
+        input: String,
+        voice: String? = nil,
+        model: String? = nil,
+        responseFormat: String? = nil,
+        speed: Double? = nil
+    ) -> AsyncThrowingStream<Data, Error> {
+        let settings = AppSettings.shared
+        guard let url = settings.speechURL else {
+            return AsyncThrowingStream { $0.finish(throwing: InferenceError.invalidConfiguration) }
+        }
+
+        let format = responseFormat ?? settings.ttsFormat
+        var body: [String: Any] = [
+            "model": model?.isEmpty == false ? model! : settings.ttsModel,
+            "input": input,
+            "voice": voice?.isEmpty == false ? voice! : settings.ttsVoice,
+            "response_format": format,
+        ]
+        if let speed { body["speed"] = speed }
+
+        // Streaming is only defined for pcm/wav at normal speed; asking for it otherwise
+        // makes stricter servers reject the request outright.
+        if ["pcm", "wav"].contains(format), speed == nil || speed == 1.0 {
+            body["stream_format"] = "audio"
+        }
+
+        let request: URLRequest
+        do {
+            request = try jsonPOSTRequest(url: url, body: body)
+        } catch {
+            return AsyncThrowingStream { $0.finish(throwing: error) }
+        }
+
+        return AsyncThrowingStream { continuation in
+            Task {
+                do {
+                    let (bytes, response) = try await URLSession.shared.bytes(for: request)
+                    try await validate(response, bytes: bytes)
+
+                    var buffer = Data()
+                    var lastFlush = Date()
+                    var sinceTimeCheck = 0
+
+                    for try await byte in bytes {
+                        buffer.append(byte)
+
+                        if buffer.count >= Self.audioChunkBytes {
+                            continuation.yield(buffer)
+                            buffer.removeAll(keepingCapacity: true)
+                            lastFlush = Date()
+                            sinceTimeCheck = 0
+                            continue
+                        }
+
+                        // Checking the clock per byte would dominate the loop; sample it.
+                        sinceTimeCheck += 1
+                        if sinceTimeCheck >= 1024 {
+                            sinceTimeCheck = 0
+                            if !buffer.isEmpty, Date().timeIntervalSince(lastFlush) >= Self.audioFlushInterval {
+                                continuation.yield(buffer)
+                                buffer.removeAll(keepingCapacity: true)
+                                lastFlush = Date()
+                            }
+                        }
+                    }
+
+                    if !buffer.isEmpty { continuation.yield(buffer) }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// Collects a whole utterance into one buffer. Used by the Settings preview, where the
+    /// audio is handed to AVAudioPlayer rather than streamed.
+    func synthesizeAll(
+        input: String,
+        voice: String? = nil,
+        model: String? = nil,
+        responseFormat: String? = nil,
+        speed: Double? = nil
+    ) async throws -> Data {
+        var audio = Data()
+        for try await chunk in synthesize(input: input, voice: voice, model: model,
+                                          responseFormat: responseFormat, speed: speed) {
+            audio.append(chunk)
+        }
+        return audio
+    }
+
     // MARK: - Generate
 
     /// Ollama's `/api/generate` has no OpenAI equivalent that preserves images or a system

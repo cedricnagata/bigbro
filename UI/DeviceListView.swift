@@ -3,11 +3,20 @@ import SwiftUI
 struct DeviceListView: View {
     @EnvironmentObject var pairingManager: PairingManager
     @EnvironmentObject var ollamaMonitor: OllamaMonitor
+    @EnvironmentObject var speechMonitor: SpeechMonitor
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         if ollamaMonitor.status == .unreachable {
-            Label("Ollama not running", systemImage: "exclamationmark.triangle")
+            Label("Inference backend not running", systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.orange)
+                .font(.caption)
+        }
+
+        // Gated on .unreachable, which SpeechMonitor only reports when speech is enabled —
+        // users who never turn it on never see this.
+        if speechMonitor.status == .unreachable {
+            Label("Speech backend not running", systemImage: "exclamationmark.triangle")
                 .foregroundStyle(.orange)
                 .font(.caption)
         }
