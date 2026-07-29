@@ -85,11 +85,16 @@ private struct GeneralSettingsTab: View {
                         }
                     }
 
-                    LabeledContent("Speech Model") {
-                        TextField("", text: $settings.ttsModel)
-                            .labelsHidden()
-                            .frame(maxWidth: .infinity, alignment: .trailing)
-                    }
+                    Text("Which speaker the model uses — `af_heart`, `alloy`, `en_US-amy-medium`. Voice names come from the model, not from the server.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    BackendModelField(
+                        title: "Speech Model",
+                        value: $settings.ttsModel,
+                        options: speechMonitor.availableModels,
+                        help: "The installed model that performs synthesis. LocalAI names these from its gallery — chatterbox, piper, kokoro — not `tts-1`, which is an OpenAI-only alias."
+                    )
 
                     LabeledContent("Audio Format") {
                         Picker("Audio Format", selection: $settings.ttsFormat) {
@@ -101,11 +106,12 @@ private struct GeneralSettingsTab: View {
                         .frame(maxWidth: .infinity, alignment: .trailing)
                     }
 
-                    LabeledContent("Transcription Model") {
-                        TextField("", text: $settings.sttModel)
-                            .labelsHidden()
-                            .frame(maxWidth: .infinity, alignment: .trailing)
-                    }
+                    BackendModelField(
+                        title: "Transcription Model",
+                        value: $settings.sttModel,
+                        options: speechMonitor.availableModels,
+                        help: "The installed speech-to-text model, e.g. `whisper-base`."
+                    )
 
                     if let error = preview.error {
                         Text(error)
@@ -125,6 +131,66 @@ private struct GeneralSettingsTab: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+/// A model identifier, with a menu of what the backend actually reports.
+///
+/// Free-form because model names are backend-specific — LocalAI uses gallery names, Speaches
+/// uses Hugging Face ids, Kokoro-FastAPI just calls it `kokoro` — and not every server can list
+/// them. The menu and the warning exist because the common failure is a name the backend does
+/// not have, which otherwise only surfaces later as an HTTP 404 on the first request.
+///
+/// `/v1/models` reports every model the backend serves, chat models included; there is no
+/// capability tag to filter on, so the same list backs both the speech and transcription fields.
+private struct BackendModelField: View {
+    let title: String
+    @Binding var value: String
+    let options: [String]
+    var help: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            LabeledContent(title) {
+                HStack(spacing: 6) {
+                    TextField("Pick one from Choose", text: $value)
+                        .labelsHidden()
+                        .frame(maxWidth: .infinity)
+
+                    if !options.isEmpty {
+                        Menu("Choose") {
+                            ForEach(options, id: \.self) { option in
+                                Button(option) { value = option }
+                            }
+                        }
+                        .fixedSize()
+                    }
+                }
+            }
+
+            if let problem {
+                Label(problem, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            } else if let help {
+                Text(help)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// Only meaningful once the backend has actually reported a list — an empty `options`
+    /// means unreachable or a server with no listing endpoint, not "nothing installed".
+    private var problem: String? {
+        guard !options.isEmpty else { return nil }
+        if value.isEmpty {
+            return "No model selected — pick one from Choose."
+        }
+        if !options.contains(value) {
+            return "The backend does not list “\(value)”. Requests will fail with HTTP 404."
+        }
+        return nil
     }
 }
 

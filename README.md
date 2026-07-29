@@ -55,6 +55,27 @@ faster-whisper for transcription — and describes itself as "Ollama, but for TT
 Enable speech in **Settings → Speech**, then use **Preview** to confirm a voice works before
 involving a device.
 
+### Speech model vs voice
+
+These are two different things and both have to be right:
+
+- **Speech model** — the installed model that performs synthesis, named by the *backend*. LocalAI
+  uses its gallery names (`chatterbox`, `piper`, `kokoro`), Speaches uses Hugging Face ids,
+  Kokoro-FastAPI just calls it `kokoro`. `tts-1` is an **OpenAI-only alias** and is not present on
+  most local backends.
+- **Voice** — which speaker that model produces, named by the *model*. Kokoro has `af_heart`,
+  `am_adam`, `bf_emma`; Piper has `en-us-amy-low`. A voice only means something to the model that
+  defines it.
+
+BigBro populates the **Choose** menu next to each model field from the backend's `/v1/models`, and
+warns inline if the configured name is not in that list — so a wrong name shows up in Settings
+rather than as a 404 on the first request.
+
+> **`model "tts-1" not found`** means the backend has no model by that name. Run
+> `curl http://localhost:8080/v1/models` to see what is installed. A fresh LocalAI has *no* models
+> at all — install a TTS one from its gallery (Web UI → Models, or
+> `local-ai models install <name>`) before enabling speech.
+
 ## Installation
 
 Download the latest release from the [Releases](../../releases) page and move BigBro.app to your Applications folder.

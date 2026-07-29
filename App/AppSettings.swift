@@ -73,9 +73,13 @@ final class AppSettings: ObservableObject {
         let defaults = UserDefaults.standard
         defaultModel   = defaults.string(forKey: "bigbro.defaultModel") ?? "gpt-oss-20b"
         speechEnabled  = defaults.bool(forKey: "bigbro.speechEnabled")
-        ttsModel       = defaults.string(forKey: "bigbro.ttsModel") ?? "tts-1"
+        // Model names are backend-specific and there is no portable default: `tts-1` and
+        // `whisper-1` are OpenAI-only aliases, LocalAI uses gallery names, Speaches uses
+        // Hugging Face ids. Start empty so Settings prompts for a real choice from
+        // /v1/models rather than shipping a name that 404s on most backends.
+        ttsModel       = defaults.string(forKey: "bigbro.ttsModel") ?? ""
         ttsVoice       = defaults.string(forKey: "bigbro.ttsVoice") ?? "af_heart"
         ttsFormat      = defaults.string(forKey: "bigbro.ttsFormat") ?? "pcm"
-        sttModel       = defaults.string(forKey: "bigbro.sttModel") ?? "whisper-1"
+        sttModel       = defaults.string(forKey: "bigbro.sttModel") ?? ""
     }
 }

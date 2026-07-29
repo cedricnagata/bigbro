@@ -5,6 +5,7 @@ enum InferenceError: Error, LocalizedError {
     case upstreamFailure(statusCode: Int, body: String?)
     case invalidResponse
     case unsupportedOption(String)
+    case modelNotSelected(capability: String)
 
     var errorDescription: String? {
         switch self {
@@ -19,6 +20,8 @@ enum InferenceError: Error, LocalizedError {
             return "Unexpected response from the backend."
         case .unsupportedOption(let name):
             return "'\(name)' is not supported on an OpenAI-compatible backend."
+        case .modelNotSelected(let capability):
+            return "No \(capability) model is selected. Pick one in BigBro Settings → Speech."
         }
     }
 }
@@ -414,9 +417,16 @@ struct OpenAIProxy {
             return AsyncThrowingStream { $0.finish(throwing: InferenceError.invalidConfiguration) }
         }
 
+        // Sending an empty model name produces an opaque 404 from the backend; naming the
+        // real problem is far more useful.
+        let resolvedModel = model?.isEmpty == false ? model! : settings.ttsModel
+        guard !resolvedModel.isEmpty else {
+            return AsyncThrowingStream { $0.finish(throwing: InferenceError.modelNotSelected(capability: "speech")) }
+        }
+
         let format = responseFormat ?? settings.ttsFormat
         var body: [String: Any] = [
-            "model": model?.isEmpty == false ? model! : settings.ttsModel,
+            "model": resolvedModel,
             "input": input,
             "voice": voice?.isEmpty == false ? voice! : settings.ttsVoice,
             "response_format": format,
@@ -518,6 +528,11 @@ struct OpenAIProxy {
             throw InferenceError.invalidConfiguration
         }
 
+        let resolvedModel = model?.isEmpty == false ? model! : settings.sttModel
+        guard !resolvedModel.isEmpty else {
+            throw InferenceError.modelNotSelected(capability: "transcription")
+        }
+
         var body = MultipartBody()
         body.addFile(
             "file",
@@ -525,7 +540,7 @@ struct OpenAIProxy {
             contentType: MultipartBody.audioContentType(for: format),
             fileData: audio
         )
-        body.addField("model", model?.isEmpty == false ? model! : settings.sttModel)
+        body.addField("model", resolvedModel)
         body.addField("response_format", "json")
         if let language    { body.addField("language", language) }
         if let prompt      { body.addField("prompt", prompt) }
