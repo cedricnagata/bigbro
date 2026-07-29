@@ -1,9 +1,23 @@
 import Foundation
 
-enum InferenceError: Error {
+enum InferenceError: Error, LocalizedError {
     case invalidConfiguration
-    case upstreamFailure(statusCode: Int)
+    case upstreamFailure(statusCode: Int, body: String?)
     case invalidResponse
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidConfiguration:
+            return "Ollama URL is not configured."
+        case .upstreamFailure(let statusCode, let body):
+            if let body, !body.isEmpty {
+                return "Ollama returned HTTP \(statusCode): \(body)"
+            }
+            return "Ollama returned HTTP \(statusCode)."
+        case .invalidResponse:
+            return "Unexpected response from Ollama."
+        }
+    }
 }
 
 // Sentinel prefix yielded when Ollama returns tool_calls in a streaming response.
@@ -27,6 +41,34 @@ struct InferenceProxy {
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         request.timeoutInterval = 300  // 5 min cap for very slow models
         return request
+    }
+
+    /// Cap on how much of an upstream error body is quoted back in the thrown error.
+    private static let maxErrorBodyLength = 2000
+
+    /// Throws unless the response is HTTP 200. `bytes` is consumed only on failure, so a
+    /// successful caller can still stream it. Without this, Ollama's non-200 JSON error
+    /// bodies get parsed as NDJSON, yield no deltas, and reach the client as a successful
+    /// empty stream.
+    private func validate(_ response: URLResponse, bytes: URLSession.AsyncBytes) async throws {
+        guard let http = response as? HTTPURLResponse else { throw InferenceError.invalidResponse }
+        guard http.statusCode != 200 else { return }
+
+        var body = ""
+        for try await line in bytes.lines {
+            body += line
+            if body.count >= Self.maxErrorBodyLength { break }
+        }
+        throw InferenceError.upstreamFailure(statusCode: http.statusCode, body: body.isEmpty ? nil : body)
+    }
+
+    private func validate(_ response: URLResponse, data: Data) throws {
+        guard let http = response as? HTTPURLResponse else { throw InferenceError.invalidResponse }
+        guard http.statusCode != 200 else { return }
+        throw InferenceError.upstreamFailure(
+            statusCode: http.statusCode,
+            body: String(data: data.prefix(Self.maxErrorBodyLength), encoding: .utf8)
+        )
     }
 
     // MARK: - /api/chat (streaming)
@@ -59,7 +101,8 @@ struct InferenceProxy {
                     if let keepAlive             { body["keep_alive"] = keepAlive }
                     let request = try jsonPOSTRequest(url: url, body: body)
 
-                    let (bytes, _) = try await URLSession.shared.bytes(for: request)
+                    let (bytes, response) = try await URLSession.shared.bytes(for: request)
+                    try await validate(response, bytes: bytes)
                     for try await line in bytes.lines {
                         guard !line.isEmpty,
                               let lineData = line.data(using: .utf8),
@@ -109,10 +152,7 @@ struct InferenceProxy {
         let request = try jsonPOSTRequest(url: url, body: body)
 
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-            throw InferenceError.upstreamFailure(statusCode: code)
-        }
+        try validate(response, data: data)
 
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let message = json["message"] as? [String: Any] else {
@@ -167,7 +207,8 @@ struct InferenceProxy {
                     if let keepAlive             { body["keep_alive"] = keepAlive }
                     let request = try jsonPOSTRequest(url: url, body: body)
 
-                    let (bytes, _) = try await URLSession.shared.bytes(for: request)
+                    let (bytes, response) = try await URLSession.shared.bytes(for: request)
+                    try await validate(response, bytes: bytes)
                     for try await line in bytes.lines {
                         guard !line.isEmpty,
                               let lineData = line.data(using: .utf8),
@@ -217,10 +258,7 @@ struct InferenceProxy {
         let request = try jsonPOSTRequest(url: url, body: body)
 
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-            throw InferenceError.upstreamFailure(statusCode: code)
-        }
+        try validate(response, data: data)
 
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let result = json["response"] as? String else {
