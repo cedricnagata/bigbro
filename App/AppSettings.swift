@@ -4,9 +4,14 @@ import Combine
 final class AppSettings: ObservableObject {
     static let shared = AppSettings()
 
-    /// Single source of truth for the Ollama host. Every upstream URL in the app is
-    /// derived from this — do not re-declare the host anywhere else.
-    static let ollamaBaseURL = "http://localhost:11434"
+    /// Host of the chat backend. Every upstream URL in the app is derived from this — do
+    /// not re-declare the host anywhere else.
+    static let chatHost = "http://localhost:11434"
+
+    /// OpenAI-compatible base. Ollama, LocalAI, Speaches, vLLM and llama.cpp-server all
+    /// serve the same endpoints under this prefix, which is why BigBro targets it rather
+    /// than any one backend's native API.
+    static var chatBaseURL: String { chatHost + "/v1" }
 
     @Published var defaultModel: String {
         didSet { UserDefaults.standard.set(defaultModel, forKey: "bigbro.defaultModel") }
@@ -14,13 +19,16 @@ final class AppSettings: ObservableObject {
 
     // MARK: - Derived upstream URLs
 
-    var chatURL: URL?     { Self.ollamaURL("/api/chat") }
-    var generateURL: URL? { Self.ollamaURL("/api/generate") }
-    var tagsURL: URL?     { Self.ollamaURL("/api/tags") }
-    var pullURL: URL?     { Self.ollamaURL("/api/pull") }
+    var chatCompletionsURL: URL? { Self.url(Self.chatBaseURL, "/chat/completions") }
+    var modelsURL: URL?          { Self.url(Self.chatBaseURL, "/models") }
 
-    private static func ollamaURL(_ path: String) -> URL? {
-        URL(string: ollamaBaseURL + path)
+    /// Ollama-native. Listing and installing models have no OpenAI-compatible equivalent
+    /// (`/v1/models` lists but cannot pull), so these stay on the native API.
+    var tagsURL: URL? { Self.url(Self.chatHost, "/api/tags") }
+    var pullURL: URL? { Self.url(Self.chatHost, "/api/pull") }
+
+    private static func url(_ base: String, _ path: String) -> URL? {
+        URL(string: base + path)
     }
 
     init() {

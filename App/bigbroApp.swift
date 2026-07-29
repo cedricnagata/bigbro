@@ -99,7 +99,7 @@ final class AppModel: ObservableObject {
 
 final class AppRouter: PeerServerDelegate, @unchecked Sendable {
     private let pairingManager: PairingManager
-    private let inferenceProxy = InferenceProxy()
+    private let proxy = OpenAIProxy()
     private let ollamaMonitor: OllamaMonitor
     private let modelDownloader: ModelDownloader
     private let powerAssertion = PowerAssertion()
@@ -184,6 +184,30 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         await server.send(["type": "done", "requestId": requestId], to: deviceId)
     }
 
+    // MARK: - Event forwarding
+
+    /// Forwards one inference event to the peer.
+    ///
+    /// Reasoning goes out as its own message type rather than folded into `chunk`: the
+    /// client pipes chunks to text-to-speech, so merging them would have the model narrate
+    /// its own deliberation aloud. Clients that predate this type ignore it.
+    private func send(
+        _ event: InferenceEvent,
+        requestId: String,
+        deviceId: String,
+        server: PeerServer
+    ) async {
+        switch event {
+        case .delta(let text):
+            await server.send(["type": "chunk", "requestId": requestId, "delta": text], to: deviceId)
+        case .reasoning(let text):
+            await server.send(["type": "thinking", "requestId": requestId, "delta": text], to: deviceId)
+        case .toolCalls(let calls):
+            print("[AppRouter] toolCall detected for \(requestId.prefix(8)): \(calls.count)")
+            await server.send(["type": "toolCall", "requestId": requestId, "calls": calls], to: deviceId)
+        }
+    }
+
     // MARK: - Request handlers
 
     private func handleRequest(_ message: [String: Any], server: PeerServer, deviceId: String) async {
@@ -212,9 +236,9 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         }
 
         do {
+            var chunkCount = 0
             if streaming {
-                var chunkCount = 0
-                for try await delta in inferenceProxy.forwardStream(
+                for try await event in proxy.chatStream(
                     messages: messagesRaw,
                     model: model,
                     tools: tools,
@@ -223,21 +247,11 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
                     think: think,
                     keepAlive: keepAlive
                 ) {
-                    if delta.hasPrefix(toolCallsSentinel) {
-                        let jsonStr = String(delta.dropFirst(toolCallsSentinel.count))
-                        if let data = jsonStr.data(using: .utf8),
-                           let calls = try? JSONSerialization.jsonObject(with: data) {
-                            print("[AppRouter] toolCall detected for \(requestId.prefix(8))")
-                            await server.send(["type": "toolCall", "requestId": requestId, "calls": calls], to: deviceId)
-                        }
-                    } else {
-                        chunkCount += 1
-                        await server.send(["type": "chunk", "requestId": requestId, "delta": delta], to: deviceId)
-                    }
+                    if case .delta = event { chunkCount += 1 }
+                    await send(event, requestId: requestId, deviceId: deviceId, server: server)
                 }
-                print("[AppRouter] Stream complete for \(requestId.prefix(8)): \(chunkCount) chunk(s)")
             } else {
-                let reply = try await inferenceProxy.forward(
+                for event in try await proxy.chat(
                     messages: messagesRaw,
                     model: model,
                     tools: tools,
@@ -245,19 +259,12 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
                     options: options,
                     think: think,
                     keepAlive: keepAlive
-                )
-                print("[AppRouter] Non-streaming reply for \(requestId.prefix(8)): \(reply.count) chars")
-                if reply.hasPrefix(toolCallsSentinel) {
-                    let jsonStr = String(reply.dropFirst(toolCallsSentinel.count))
-                    if let tcData = jsonStr.data(using: .utf8),
-                       let calls = try? JSONSerialization.jsonObject(with: tcData) {
-                        print("[AppRouter] toolCall detected for \(requestId.prefix(8))")
-                        await server.send(["type": "toolCall", "requestId": requestId, "calls": calls], to: deviceId)
-                    }
-                } else {
-                    await server.send(["type": "chunk", "requestId": requestId, "delta": reply], to: deviceId)
+                ) {
+                    if case .delta = event { chunkCount += 1 }
+                    await send(event, requestId: requestId, deviceId: deviceId, server: server)
                 }
             }
+            print("[AppRouter] Complete for \(requestId.prefix(8)): \(chunkCount) chunk(s)")
             await server.send(["type": "done", "requestId": requestId], to: deviceId)
             print("[AppRouter] done sent for \(requestId.prefix(8))")
         } catch {
@@ -296,14 +303,14 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         }
 
         do {
+            var chunkCount = 0
             if streaming {
-                var chunkCount = 0
-                for try await delta in inferenceProxy.forwardGenerateStream(
+                for try await event in proxy.generateStream(
                     prompt: prompt,
                     images: images,
-                    suffix: suffix,
                     system: system,
                     template: template,
+                    suffix: suffix,
                     model: model,
                     format: format,
                     options: options,
@@ -311,27 +318,28 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
                     think: think,
                     keepAlive: keepAlive
                 ) {
-                    chunkCount += 1
-                    await server.send(["type": "chunk", "requestId": requestId, "delta": delta], to: deviceId)
+                    if case .delta = event { chunkCount += 1 }
+                    await send(event, requestId: requestId, deviceId: deviceId, server: server)
                 }
-                print("[AppRouter] Generate stream complete for \(requestId.prefix(8)): \(chunkCount) chunk(s)")
             } else {
-                let reply = try await inferenceProxy.forwardGenerate(
+                for event in try await proxy.generate(
                     prompt: prompt,
                     images: images,
-                    suffix: suffix,
                     system: system,
                     template: template,
+                    suffix: suffix,
                     model: model,
                     format: format,
                     options: options,
                     raw: raw,
                     think: think,
                     keepAlive: keepAlive
-                )
-                print("[AppRouter] Non-streaming generate reply for \(requestId.prefix(8)): \(reply.count) chars")
-                await server.send(["type": "chunk", "requestId": requestId, "delta": reply], to: deviceId)
+                ) {
+                    if case .delta = event { chunkCount += 1 }
+                    await send(event, requestId: requestId, deviceId: deviceId, server: server)
+                }
             }
+            print("[AppRouter] Generate complete for \(requestId.prefix(8)): \(chunkCount) chunk(s)")
             await server.send(["type": "done", "requestId": requestId], to: deviceId)
             print("[AppRouter] done sent for \(requestId.prefix(8))")
         } catch {

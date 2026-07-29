@@ -2,7 +2,9 @@
 
 A macOS menu bar app that turns your Mac into a local AI inference server for nearby iOS devices.
 
-BigBro advertises itself on the local network via Bonjour, accepts pairing requests from iOS apps with manual per-device approval, and proxies inference requests to a local [Ollama](https://ollama.ai) instance. It fully covers both the `/api/chat` endpoint (streaming, tool calling, images, format, options) and `/api/generate`.
+BigBro advertises itself on the local network via Bonjour, accepts pairing requests from iOS apps with manual per-device approval, and proxies inference requests to a local backend over the **OpenAI-compatible API** (`/v1/chat/completions`) — streaming, tool calling, images, structured output and model options.
+
+Targeting the OpenAI surface rather than any one backend's native API means [Ollama](https://ollama.ai), [LocalAI](https://localai.io), Speaches, vLLM, LM Studio and llama.cpp-server are all interchangeable: switching backends is a base-URL change, not a code change.
 
 ## How it works
 
@@ -59,20 +61,23 @@ BigBro uses a custom framed TCP protocol on port 8765. Each message is a 4-byte 
 | Type | Fields | Description |
 |---|---|---|
 | `hello` | `deviceId`, `deviceName`, `appName`, `requiredModels?` | Initiate pairing |
-| `request` | `requestId`, `messages`, `streaming`, `tools?`, `model?`, `format?`, `options?`, `think?`, `keep_alive?` | Chat request (`/api/chat`) |
-| `generateRequest` | `requestId`, `prompt`, `streaming`, `images?`, `suffix?`, `system?`, `template?`, `model?`, `format?`, `options?`, `raw?`, `think?`, `keep_alive?` | Generate request (`/api/generate`) |
+| `request` | `requestId`, `messages`, `streaming`, `tools?`, `model?`, `format?`, `options?`, `think?`, `keep_alive?` | Chat request → `/v1/chat/completions` |
+| `generateRequest` | `requestId`, `prompt`, `streaming`, `images?`, `suffix?`, `system?`, `template?`, `model?`, `format?`, `options?`, `raw?`, `think?`, `keep_alive?` | Single-turn generate → `/v1/chat/completions` |
 | `bye` | — | Clean disconnect |
+
+The wire format is unchanged from BigBro's Ollama-native days — the Mac translates it. `think` maps to `reasoning_effort`, `format` to `response_format`, `options` to their OpenAI equivalents, and message images to content parts. `template`, `raw` and `suffix` have no chat-completions equivalent and return an `error` rather than being silently dropped.
 
 ### Mac → iOS messages
 
 | Type | Fields | Description |
 |---|---|---|
 | `helloAck` | `status` (`"approved"` / `"denied"`), `missingModels?` | Pairing result with missing model list |
-| `chunk` | `requestId`, `delta` | Text delta from Ollama |
-| `toolCall` | `requestId`, `calls` | Tool calls array from Ollama (`/api/chat` only) |
+| `chunk` | `requestId`, `delta` | Assistant text delta |
+| `thinking` | `requestId`, `delta` | Reasoning delta, kept separate from `chunk` so it is never spoken or shown as an answer |
+| `toolCall` | `requestId`, `calls` | Tool calls array (`request` only) |
 | `done` | `requestId` | Request complete |
 | `error` | `requestId`, `message` | Inference or upstream error |
-| `modelsUpdate` | `missingModels` | Pushed when Ollama's model list changes |
+| `modelsUpdate` | `missingModels` | Pushed when the backend's model list changes |
 | `bye` | — | Clean disconnect |
 
 ## Building from source
@@ -89,15 +94,19 @@ Required entitlements (already configured in the project):
 bigbro/
 ├── App/
 │   ├── bigbroApp.swift         — app entry, AppModel, AppRouter
-│   ├── AppSettings.swift       — default model (UserDefaults)
-│   └── OllamaMonitor.swift     — polls /api/tags every 5s, publishes installed models
+│   ├── AppSettings.swift       — backend URLs + default model (UserDefaults)
+│   ├── BackendStatus.swift     — BackendStatus enum, BackendStatusReporting protocol
+│   ├── OllamaMonitor.swift     — polls the backend every 5s, publishes installed models
+│   └── ModelDownloader.swift   — drives model pulls, publishes throttled progress
 ├── Server/
 │   ├── PeerServer.swift        — TCP server (NWListener)
 │   ├── BonjourAdvertiser.swift — mDNS advertisement (_bigbro._tcp.)
-│   └── PairingManager.swift    — device approval, persistence, required-model tracking
+│   ├── PairingManager.swift    — device approval, persistence, required-model tracking
+│   └── PowerAssertion.swift    — keeps the Mac awake while peers are connected
 ├── Proxy/
-│   └── InferenceProxy.swift    — Ollama HTTP proxy (/api/chat + /api/generate)
+│   └── OpenAIProxy.swift       — OpenAI-compatible proxy (/v1/chat/completions, SSE)
 └── UI/
     ├── DeviceListView.swift     — menu bar device list with model status
-    └── SettingsView.swift       — settings tabs (Ollama status + devices)
+    ├── BackendStatusView.swift  — reusable backend status indicator
+    └── SettingsView.swift       — settings tabs (backend status + devices)
 ```
