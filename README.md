@@ -106,12 +106,32 @@ existing BigBroKit clients work against this branch without a rebuild.
 | `generateRequest` | `requestId`, `prompt`, `streaming`, `images?`, `system?`, `model?`, `options?` | Single-turn generate |
 | `speechRequest` | `requestId`, `input`, `voice?`, `speed?` | Text-to-speech |
 | `transcribeRequest` | `requestId`, `audio` (base64), `audioFormat?` | Speech-to-text. Max 10 MB decoded |
+| `preload` | `requestId`, `model?` (`"text"` / `"vision"`, default `"text"`) | Loads a model into memory without generating anything — see below |
 | `bye` | — | Clean disconnect |
 
 Routing is decided by request content (images present → vision model), not by the `model` field.
-`format` (JSON-schema-constrained output), `think` (reasoning effort) and `keep_alive` are
-accepted for wire compatibility but currently have no effect — gpt-oss always reasons via its
-harmony `analysis` channel, and both models stay resident regardless of idle time.
+`format` (JSON-schema-constrained output) and `keep_alive` are accepted for wire compatibility
+but currently have no effect — both models stay resident regardless of idle time. `think`
+(default on) gates whether reasoning tokens are sent to the client as `thinking` messages;
+gpt-oss computes its harmony `analysis` channel either way, so this only controls what goes
+out over the wire, not what the model does.
+
+### Preloading a model
+
+Loading a model — reading its weights off disk and materializing them into MLX arrays — is a
+real, multi-second cost that BigBro only pays lazily, the first time a request actually needs
+that model. That cost otherwise lands on whichever message happens to be first. Send `preload`
+when a chat session is likely to start soon (e.g. when the chat screen appears) to move it
+earlier instead:
+
+- If the model is already downloaded, BigBro loads it into memory and replies with `done`
+  once it's ready to use — nothing is generated.
+- If it isn't downloaded yet, this triggers the same `modelDownloading` flow a real request
+  would.
+
+BigBroKit exposes this as `BigBroClient.preloadModel(vision:)`. It's a pure optimization —
+skipping it is harmless, since `request`/`generateRequest` load the model themselves anyway if
+it isn't already resident.
 
 ### Mac → iOS messages
 

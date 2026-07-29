@@ -154,6 +154,9 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         case "transcribeRequest":
             print("[AppRouter] transcribeRequest from \(deviceId.prefix(8))")
             await handleTranscribeRequest(message, server: server, deviceId: deviceId)
+        case "preload":
+            print("[AppRouter] preload from \(deviceId.prefix(8))")
+            await handlePreloadRequest(message, server: server, deviceId: deviceId)
         case "bye":
             print("[AppRouter] bye from \(deviceId.prefix(8)), marking disconnected")
             await MainActor.run { pairingManager.markDisconnected(deviceId) }
@@ -180,16 +183,16 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
 
     // MARK: - Missing-model handling
 
-    /// Returns true once the model this request needs is ready to use. If it isn't, kicks
-    /// off (or reports) a download and tells the peer, mirroring the old Ollama-missing-model
-    /// flow so BigBroKit clients need no changes.
+    /// Returns true once `kind` is ready to use. If it isn't, kicks off (or reports) a
+    /// download and tells the peer, mirroring the old Ollama-missing-model flow so BigBroKit
+    /// clients need no changes. Callers that already know which model they need (a `preload`)
+    /// pass it directly; chat/generate derive it from message content via `mlxEngine.kind(for:)`.
     private func ensureModelReady(
-        for messages: [[String: Any]],
+        _ kind: MLXEngine.ModelKind,
         requestId: String,
         deviceId: String,
         server: PeerServer
     ) async -> Bool {
-        let kind = mlxEngine.kind(for: messages)
         if mlxEngine.isDownloaded(kind) { return true }
 
         let modelName = kind.displayName
@@ -217,16 +220,22 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
     /// Reasoning goes out as its own message type rather than folded into `chunk`: the
     /// client pipes chunks to text-to-speech, so merging them would have the model narrate
     /// its own deliberation aloud. Clients that predate this type ignore it.
+    ///
+    /// `sendReasoning` gates only what goes out over the wire, not generation itself — the
+    /// model still produces the analysis channel either way, so a client that wants a faster
+    /// perceived response can opt out of receiving it without changing what gets computed.
     private func send(
         _ event: InferenceEvent,
         requestId: String,
         deviceId: String,
-        server: PeerServer
+        server: PeerServer,
+        sendReasoning: Bool
     ) async {
         switch event {
         case .delta(let text):
             await server.send(["type": "chunk", "requestId": requestId, "delta": text], to: deviceId)
         case .reasoning(let text):
+            guard sendReasoning else { return }
             await server.send(["type": "thinking", "requestId": requestId, "delta": text], to: deviceId)
         case .toolCalls(let calls):
             print("[AppRouter] toolCall detected for \(requestId.prefix(8)): \(calls.count)")
@@ -244,13 +253,14 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         requestId: String,
         deviceId: String,
         server: PeerServer,
-        label: String
+        label: String,
+        sendReasoning: Bool
     ) async {
         do {
             var chunkCount = 0
             for try await event in stream {
                 if case .delta = event { chunkCount += 1 }
-                await send(event, requestId: requestId, deviceId: deviceId, server: server)
+                await send(event, requestId: requestId, deviceId: deviceId, server: server, sendReasoning: sendReasoning)
             }
             print("[AppRouter] \(label) complete for \(requestId.prefix(8)): \(chunkCount) chunk(s)")
             await server.send(["type": "done", "requestId": requestId], to: deviceId)
@@ -270,13 +280,17 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         }
         let tools   = (message["tools"] as? [[String: Any]]) ?? []
         let options = message["options"] as? [String: Any]
+        // Absent means "unspecified", which defaults to on — this is what every client sent
+        // before `think` existed, so their behavior (reasoning always forwarded) is unchanged.
+        let sendReasoning = (message["think"] as? Bool) ?? true
 
-        print("[AppRouter] handleRequest: requestId=\(requestId.prefix(8)) tools=\(tools.count) messages=\(messagesRaw.count)")
+        print("[AppRouter] handleRequest: requestId=\(requestId.prefix(8)) tools=\(tools.count) messages=\(messagesRaw.count) think=\(sendReasoning)")
 
-        guard await ensureModelReady(for: messagesRaw, requestId: requestId, deviceId: deviceId, server: server) else { return }
+        let kind = mlxEngine.kind(for: messagesRaw)
+        guard await ensureModelReady(kind, requestId: requestId, deviceId: deviceId, server: server) else { return }
 
         let stream = mlxEngine.chatStream(messages: messagesRaw, tools: tools, options: options)
-        await drain(stream, requestId: requestId, deviceId: deviceId, server: server, label: "Request")
+        await drain(stream, requestId: requestId, deviceId: deviceId, server: server, label: "Request", sendReasoning: sendReasoning)
     }
 
     private func handleGenerateRequest(_ message: [String: Any], server: PeerServer, deviceId: String) async {
@@ -288,8 +302,9 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         let images  = (message["images"] as? [String]) ?? []
         let system  = message["system"] as? String
         let options = message["options"] as? [String: Any]
+        let sendReasoning = (message["think"] as? Bool) ?? true
 
-        print("[AppRouter] handleGenerateRequest: requestId=\(requestId.prefix(8)) prompt='\(prompt.prefix(40))…'")
+        print("[AppRouter] handleGenerateRequest: requestId=\(requestId.prefix(8)) prompt='\(prompt.prefix(40))…' think=\(sendReasoning)")
 
         var messagesRaw: [[String: Any]] = []
         if let system, !system.isEmpty {
@@ -299,10 +314,37 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         if !images.isEmpty { user["images"] = images }
         messagesRaw.append(user)
 
-        guard await ensureModelReady(for: messagesRaw, requestId: requestId, deviceId: deviceId, server: server) else { return }
+        let kind = mlxEngine.kind(for: messagesRaw)
+        guard await ensureModelReady(kind, requestId: requestId, deviceId: deviceId, server: server) else { return }
 
         let stream = mlxEngine.chatStream(messages: messagesRaw, tools: [], options: options)
-        await drain(stream, requestId: requestId, deviceId: deviceId, server: server, label: "Generate")
+        await drain(stream, requestId: requestId, deviceId: deviceId, server: server, label: "Generate", sendReasoning: sendReasoning)
+    }
+
+    /// Loads a model into memory without generating anything, so a client can pay the
+    /// multi-second "materialize weights into MLX arrays" cost ahead of the user's first
+    /// message — e.g. when a chat screen opens — rather than that cost landing on the first
+    /// real request. Purely an optimization: nothing else in the app requires this message,
+    /// and skipping it is harmless since `chatStream` calls `ensureLoaded` lazily either way.
+    private func handlePreloadRequest(_ message: [String: Any], server: PeerServer, deviceId: String) async {
+        guard let requestId = message["requestId"] as? String else {
+            print("[AppRouter] handlePreloadRequest: missing requestId")
+            return
+        }
+        let wantsVision = (message["model"] as? String)?.lowercased() == "vision"
+        let kind: MLXEngine.ModelKind = wantsVision ? .vision : .text
+
+        print("[AppRouter] preload requested by \(deviceId.prefix(8)) for \(kind.displayName)")
+        guard await ensureModelReady(kind, requestId: requestId, deviceId: deviceId, server: server) else { return }
+
+        do {
+            try await mlxEngine.ensureLoaded(kind)
+            print("[AppRouter] preload complete for \(deviceId.prefix(8)): \(kind.displayName)")
+            await server.send(["type": "done", "requestId": requestId], to: deviceId)
+        } catch {
+            print("[AppRouter] preload error for \(deviceId.prefix(8)): \(error)")
+            await server.send(["type": "error", "requestId": requestId, "message": error.localizedDescription], to: deviceId)
+        }
     }
 
     // MARK: - Speech handlers
