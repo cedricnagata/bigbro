@@ -6,6 +6,14 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		141991DF609B7754312A2D97 /* MLX in Frameworks */ = {isa = PBXBuildFile; productRef = E3BA184F2A0B3A04A495B7E9 /* MLX */; };
+		46A29E05D74C06622C8A2575 /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = 5B1A4CE6387B9134F5C88BD8 /* MLXLLM */; };
+		E0AE8A3F3FCA68E6686E266E /* MLXVLM in Frameworks */ = {isa = PBXBuildFile; productRef = 0A11B8729A5EB859E7E17D6B /* MLXVLM */; };
+		7F4AFAAA8AD3BA25ACC553ED /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = A4C9785C464B08862D99712E /* MLXLMCommon */; };
+		8B7814C209C4B726B6994EB7 /* FluidAudio in Frameworks */ = {isa = PBXBuildFile; productRef = 40D221FC0DA0E0D677678993 /* FluidAudio */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		8BBE40A72F96ACE900F9DB8F /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -50,11 +58,6 @@
 			path = App;
 			sourceTree = "<group>";
 		};
-		8B96FCB52F9ADFB100A7D0D9 /* Proxy */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = Proxy;
-			sourceTree = "<group>";
-		};
 		8BBE40962F96ACE800F9DB8F /* bigbro */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
@@ -68,6 +71,16 @@
 			path = UI;
 			sourceTree = "<group>";
 		};
+		CB38E23F1C1426597F293086 /* Inference */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Inference;
+			sourceTree = "<group>";
+		};
+		72840905B0B2A87E471815EB /* Speech */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Speech;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -75,6 +88,11 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				141991DF609B7754312A2D97 /* MLX in Frameworks */,
+				46A29E05D74C06622C8A2575 /* MLXLLM in Frameworks */,
+				E0AE8A3F3FCA68E6686E266E /* MLXVLM in Frameworks */,
+				7F4AFAAA8AD3BA25ACC553ED /* MLXLMCommon in Frameworks */,
+				8B7814C209C4B726B6994EB7 /* FluidAudio in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -101,8 +119,9 @@
 				8BBE40962F96ACE800F9DB8F /* bigbro */,
 				8BBE41692F96B2FD00F9DB8F /* UI */,
 				8B96FCB32F9ADFB100A7D0D9 /* App */,
-				8B96FCB52F9ADFB100A7D0D9 /* Proxy */,
 				8B96FCAD2F9ADF8400A7D0D9 /* Server */,
+				CB38E23F1C1426597F293086 /* Inference */,
+				72840905B0B2A87E471815EB /* Speech */,
 				8BA65C0E2F9C041800EF3D9E /* bigbro.app */,
 				8BA65C0F2F9C041800EF3D9E /* bigbroTests.xctest */,
 				8BA65C102F9C041800EF3D9E /* bigbroUITests.xctest */,
@@ -127,12 +146,18 @@
 			fileSystemSynchronizedGroups = (
 				8B96FCAD2F9ADF8400A7D0D9 /* Server */,
 				8B96FCB32F9ADFB100A7D0D9 /* App */,
-				8B96FCB52F9ADFB100A7D0D9 /* Proxy */,
 				8BBE40962F96ACE800F9DB8F /* bigbro */,
 				8BBE41692F96B2FD00F9DB8F /* UI */,
+				CB38E23F1C1426597F293086 /* Inference */,
+				72840905B0B2A87E471815EB /* Speech */,
 			);
 			name = bigbro;
 			packageProductDependencies = (
+				E3BA184F2A0B3A04A495B7E9 /* MLX */,
+				5B1A4CE6387B9134F5C88BD8 /* MLXLLM */,
+				0A11B8729A5EB859E7E17D6B /* MLXVLM */,
+				A4C9785C464B08862D99712E /* MLXLMCommon */,
+				40D221FC0DA0E0D677678993 /* FluidAudio */,
 			);
 			productName = bigbro;
 			productReference = 8BA65C0E2F9C041800EF3D9E /* bigbro.app */;
@@ -210,6 +235,11 @@
 			);
 			mainGroup = 8BBE408B2F96ACE800F9DB8F;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				2D2A5820D35E45D8FB4BC1C9 /* XCRemoteSwiftPackageReference "mlx-swift" */,
+				E10252A53CFF58CC02758E17 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */,
+				AC08B76AC61A0E973917550B /* XCRemoteSwiftPackageReference "FluidAudio" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 8BBE408B2F96ACE800F9DB8F;
 			projectDirPath = "";
@@ -618,6 +648,61 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		2D2A5820D35E45D8FB4BC1C9 /* XCRemoteSwiftPackageReference "mlx-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ml-explore/mlx-swift";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 0.31.4;
+			};
+		};
+		E10252A53CFF58CC02758E17 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ml-explore/mlx-swift-lm";
+			requirement = {
+				kind = exactVersion;
+				version = 3.31.4;
+			};
+		};
+		AC08B76AC61A0E973917550B /* XCRemoteSwiftPackageReference "FluidAudio" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/FluidInference/FluidAudio.git";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 0.12.4;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		E3BA184F2A0B3A04A495B7E9 /* MLX */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 2D2A5820D35E45D8FB4BC1C9 /* XCRemoteSwiftPackageReference "mlx-swift" */;
+			productName = MLX;
+		};
+		5B1A4CE6387B9134F5C88BD8 /* MLXLLM */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E10252A53CFF58CC02758E17 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
+			productName = MLXLLM;
+		};
+		0A11B8729A5EB859E7E17D6B /* MLXVLM */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E10252A53CFF58CC02758E17 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
+			productName = MLXVLM;
+		};
+		A4C9785C464B08862D99712E /* MLXLMCommon */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E10252A53CFF58CC02758E17 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
+			productName = MLXLMCommon;
+		};
+		40D221FC0DA0E0D677678993 /* FluidAudio */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AC08B76AC61A0E973917550B /* XCRemoteSwiftPackageReference "FluidAudio" */;
+			productName = FluidAudio;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 8BBE408C2F96ACE800F9DB8F /* Project object */;
 }

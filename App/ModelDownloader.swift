@@ -6,8 +6,8 @@ import Combine
 /// Throttled progress updates (~1/sec) are emitted via a Combine publisher so both the Mac
 /// UI and the peer broadcaster can subscribe without flooding.
 ///
-/// The transport lives behind `ModelInstalling` — Ollama streams NDJSON from `/api/pull`,
-/// LocalAI polls a gallery job — so this type only coordinates state and throttling.
+/// The transport lives behind `ModelInstalling` — `MLXInstaller` drives `MLXEngine.ensureLoaded`
+/// — so this type only coordinates state and throttling.
 @MainActor
 final class ModelDownloader: ObservableObject {
     /// Kept as a nested name so existing call sites read unchanged.
@@ -26,7 +26,7 @@ final class ModelDownloader: ObservableObject {
     private var lastEmitted: [String: Date] = [:]
     private let throttleInterval: TimeInterval = 1.0
 
-    init(installer: ModelInstalling = OllamaInstaller()) {
+    init(installer: ModelInstalling = MLXInstaller()) {
         self.installer = installer
     }
 

@@ -11,8 +11,8 @@ struct BigBroApp: App {
         MenuBarExtra("BigBro", image: "bigbro") {
             DeviceListView()
                 .environmentObject(appModel.pairingManager)
-                .environmentObject(appModel.ollamaMonitor)
-                .environmentObject(appModel.speechMonitor)
+                .environmentObject(appModel.mlxEngine)
+                .environmentObject(appModel.speechEngine)
                 .environmentObject(appModel.modelDownloader)
                 .onAppear { appDelegate.appModel = appModel }
         }
@@ -20,8 +20,8 @@ struct BigBroApp: App {
         Settings {
             SettingsView()
                 .environmentObject(appModel.pairingManager)
-                .environmentObject(appModel.ollamaMonitor)
-                .environmentObject(appModel.speechMonitor)
+                .environmentObject(appModel.mlxEngine)
+                .environmentObject(appModel.speechEngine)
                 .environmentObject(appModel.modelDownloader)
         }
     }
@@ -47,8 +47,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 final class AppModel: ObservableObject {
     let pairingManager = PairingManager()
-    let ollamaMonitor = OllamaMonitor()
-    let speechMonitor = SpeechMonitor()
+    let mlxEngine = MLXEngine.shared
+    let speechEngine = SpeechEngine.shared
     let modelDownloader = ModelDownloader()
     private let server = PeerServer()
     private let advertiser = BonjourAdvertiser()
@@ -56,27 +56,17 @@ final class AppModel: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
 
     init() {
-        router = AppRouter(pairingManager: pairingManager, ollamaMonitor: ollamaMonitor,
-                           speechMonitor: speechMonitor, modelDownloader: modelDownloader)
+        router = AppRouter(pairingManager: pairingManager, modelDownloader: modelDownloader)
         pairingManager.peerServer = server
-        pairingManager.ollamaMonitor = ollamaMonitor
         pairingManager.modelDownloader = modelDownloader
-        ollamaMonitor.start()
-        speechMonitor.start()
 
-        // The poll would pick this up within 5s anyway; refreshing on the toggle makes
-        // enabling speech feel immediate.
+        // Loading Kokoro + Parakeet is not free, so it only happens once the user actually
+        // opts in — never eagerly at launch.
         AppSettings.shared.$speechEnabled
             .dropFirst()
-            .sink { [weak self] _ in
-                Task { @MainActor in await self?.speechMonitor.refresh() }
-            }
-            .store(in: &cancellables)
-
-        ollamaMonitor.$installedModels
-            .dropFirst()
-            .sink { [weak self] _ in
-                self?.pairingManager.pushModelsUpdate()
+            .filter { $0 }
+            .sink { _ in
+                Task { try? await SpeechEngine.shared.ensureLoaded() }
             }
             .store(in: &cancellables)
 
@@ -84,8 +74,7 @@ final class AppModel: ObservableObject {
             .sink { [weak self] update in
                 self?.pairingManager.broadcastDownloadProgress(model: update.model, progress: update.progress)
                 if update.progress.done && update.progress.error == nil {
-                    // Refresh installed model list so connected peers' missingModels updates.
-                    Task { await self?.ollamaMonitor.refresh() }
+                    self?.pairingManager.pushModelsUpdate()
                 }
             }
             .store(in: &cancellables)
@@ -104,8 +93,6 @@ final class AppModel: ObservableObject {
 
     func shutdown() async {
         print("[BigBro] Shutting down")
-        ollamaMonitor.stop()
-        speechMonitor.stop()
         await server.shutdown()
     }
 }
@@ -114,22 +101,17 @@ final class AppModel: ObservableObject {
 
 final class AppRouter: PeerServerDelegate, @unchecked Sendable {
     private let pairingManager: PairingManager
-    private let proxy = OpenAIProxy()
-    private let ollamaMonitor: OllamaMonitor
-    private let speechMonitor: SpeechMonitor
+    private let mlxEngine = MLXEngine.shared
+    private let speechEngine = SpeechEngine.shared
     private let modelDownloader: ModelDownloader
     private let powerAssertion = PowerAssertion()
     weak var server: PeerServer?
 
     init(
         pairingManager: PairingManager,
-        ollamaMonitor: OllamaMonitor,
-        speechMonitor: SpeechMonitor,
         modelDownloader: ModelDownloader
     ) {
         self.pairingManager = pairingManager
-        self.ollamaMonitor = ollamaMonitor
-        self.speechMonitor = speechMonitor
         self.modelDownloader = modelDownloader
         print("[AppRouter] Initialized")
     }
@@ -195,21 +177,34 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
 
     // MARK: - Missing-model handling
 
-    private func handleMissingModel(_ model: String, requestId: String, deviceId: String, server: PeerServer) async {
-        let alreadyInProgress = await MainActor.run { modelDownloader.isDownloading(model) }
+    /// Returns true once the model this request needs is ready to use. If it isn't, kicks
+    /// off (or reports) a download and tells the peer, mirroring the old Ollama-missing-model
+    /// flow so BigBroKit clients need no changes.
+    private func ensureModelReady(
+        for messages: [[String: Any]],
+        requestId: String,
+        deviceId: String,
+        server: PeerServer
+    ) async -> Bool {
+        let kind = await mlxEngine.kind(for: messages)
+        if await mlxEngine.isDownloaded(kind) { return true }
+
+        let modelName = kind.displayName
+        let alreadyInProgress = await MainActor.run { modelDownloader.isDownloading(modelName) }
         if !alreadyInProgress {
-            print("[AppRouter] Model '\(model)' missing — starting download for \(deviceId.prefix(8))")
-            await MainActor.run { modelDownloader.startDownload(model) }
+            print("[AppRouter] Model '\(modelName)' missing — starting download for \(deviceId.prefix(8))")
+            await MainActor.run { modelDownloader.startDownload(modelName) }
         } else {
-            print("[AppRouter] Model '\(model)' already downloading — informing \(deviceId.prefix(8))")
+            print("[AppRouter] Model '\(modelName)' already downloading — informing \(deviceId.prefix(8))")
         }
         await server.send([
             "type": "modelDownloading",
             "requestId": requestId,
-            "model": model,
+            "model": modelName,
             "alreadyInProgress": alreadyInProgress,
         ], to: deviceId)
         await server.send(["type": "done", "requestId": requestId], to: deviceId)
+        return false
     }
 
     // MARK: - Event forwarding
@@ -236,6 +231,32 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         }
     }
 
+    /// Drains an inference stream to the peer. `request` and `generateRequest` both funnel
+    /// through here — the old split between a streamed and single-shot code path existed
+    /// because the OpenAI-compatible backend had two different HTTP shapes; MLX generation is
+    /// always token-by-token, so there is only one path now regardless of the client's
+    /// `streaming` flag (which governs *client-side* accumulation, not what the Mac sends).
+    private func drain(
+        _ stream: AsyncThrowingStream<InferenceEvent, Error>,
+        requestId: String,
+        deviceId: String,
+        server: PeerServer,
+        label: String
+    ) async {
+        do {
+            var chunkCount = 0
+            for try await event in stream {
+                if case .delta = event { chunkCount += 1 }
+                await send(event, requestId: requestId, deviceId: deviceId, server: server)
+            }
+            print("[AppRouter] \(label) complete for \(requestId.prefix(8)): \(chunkCount) chunk(s)")
+            await server.send(["type": "done", "requestId": requestId], to: deviceId)
+        } catch {
+            print("[AppRouter] \(label) error for \(requestId.prefix(8)): \(error)")
+            await server.send(["type": "error", "requestId": requestId, "message": error.localizedDescription], to: deviceId)
+        }
+    }
+
     // MARK: - Request handlers
 
     private func handleRequest(_ message: [String: Any], server: PeerServer, deviceId: String) async {
@@ -244,61 +265,15 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
             print("[AppRouter] handleRequest: missing requestId or messages")
             return
         }
-        let tools     = (message["tools"] as? [[String: Any]]) ?? []
-        let streaming = message["streaming"] as? Bool ?? true
-        let model     = message["model"] as? String
-        let format    = message["format"]               // Any? — "json" string or schema dict
-        let options   = message["options"] as? [String: Any]
-        let think     = message["think"] as? Bool
-        let keepAlive = message["keep_alive"] as? String
+        let tools   = (message["tools"] as? [[String: Any]]) ?? []
+        let options = message["options"] as? [String: Any]
 
-        print("[AppRouter] handleRequest: requestId=\(requestId.prefix(8)) streaming=\(streaming) tools=\(tools.count) messages=\(messagesRaw.count)")
+        print("[AppRouter] handleRequest: requestId=\(requestId.prefix(8)) tools=\(tools.count) messages=\(messagesRaw.count)")
 
-        let resolvedModel = await MainActor.run {
-            model?.isEmpty == false ? model! : AppSettings.shared.defaultModel
-        }
-        let modelInstalled = await MainActor.run { ollamaMonitor.isInstalled(resolvedModel) }
-        if !modelInstalled {
-            await handleMissingModel(resolvedModel, requestId: requestId, deviceId: deviceId, server: server)
-            return
-        }
+        guard await ensureModelReady(for: messagesRaw, requestId: requestId, deviceId: deviceId, server: server) else { return }
 
-        do {
-            var chunkCount = 0
-            if streaming {
-                for try await event in proxy.chatStream(
-                    messages: messagesRaw,
-                    model: model,
-                    tools: tools,
-                    format: format,
-                    options: options,
-                    think: think,
-                    keepAlive: keepAlive
-                ) {
-                    if case .delta = event { chunkCount += 1 }
-                    await send(event, requestId: requestId, deviceId: deviceId, server: server)
-                }
-            } else {
-                for event in try await proxy.chat(
-                    messages: messagesRaw,
-                    model: model,
-                    tools: tools,
-                    format: format,
-                    options: options,
-                    think: think,
-                    keepAlive: keepAlive
-                ) {
-                    if case .delta = event { chunkCount += 1 }
-                    await send(event, requestId: requestId, deviceId: deviceId, server: server)
-                }
-            }
-            print("[AppRouter] Complete for \(requestId.prefix(8)): \(chunkCount) chunk(s)")
-            await server.send(["type": "done", "requestId": requestId], to: deviceId)
-            print("[AppRouter] done sent for \(requestId.prefix(8))")
-        } catch {
-            print("[AppRouter] Inference error for \(requestId.prefix(8)): \(error)")
-            await server.send(["type": "error", "requestId": requestId, "message": error.localizedDescription], to: deviceId)
-        }
+        let stream = await mlxEngine.chatStream(messages: messagesRaw, tools: tools, options: options)
+        await drain(stream, requestId: requestId, deviceId: deviceId, server: server, label: "Request")
     }
 
     private func handleGenerateRequest(_ message: [String: Any], server: PeerServer, deviceId: String) async {
@@ -307,73 +282,24 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
             print("[AppRouter] handleGenerateRequest: missing requestId or prompt")
             return
         }
-        let images    = (message["images"] as? [String]) ?? []
-        let suffix    = message["suffix"] as? String
-        let system    = message["system"] as? String
-        let template  = message["template"] as? String
-        let model     = message["model"] as? String
-        let format    = message["format"]
-        let options   = message["options"] as? [String: Any]
-        let raw       = message["raw"] as? Bool
-        let think     = message["think"] as? Bool
-        let keepAlive = message["keep_alive"] as? String
-        let streaming = message["streaming"] as? Bool ?? true
+        let images  = (message["images"] as? [String]) ?? []
+        let system  = message["system"] as? String
+        let options = message["options"] as? [String: Any]
 
-        print("[AppRouter] handleGenerateRequest: requestId=\(requestId.prefix(8)) streaming=\(streaming) prompt='\(prompt.prefix(40))…'")
+        print("[AppRouter] handleGenerateRequest: requestId=\(requestId.prefix(8)) prompt='\(prompt.prefix(40))…'")
 
-        let resolvedModel = await MainActor.run {
-            model?.isEmpty == false ? model! : AppSettings.shared.defaultModel
+        var messagesRaw: [[String: Any]] = []
+        if let system, !system.isEmpty {
+            messagesRaw.append(["role": "system", "content": system])
         }
-        let modelInstalled = await MainActor.run { ollamaMonitor.isInstalled(resolvedModel) }
-        if !modelInstalled {
-            await handleMissingModel(resolvedModel, requestId: requestId, deviceId: deviceId, server: server)
-            return
-        }
+        var user: [String: Any] = ["role": "user", "content": prompt]
+        if !images.isEmpty { user["images"] = images }
+        messagesRaw.append(user)
 
-        do {
-            var chunkCount = 0
-            if streaming {
-                for try await event in proxy.generateStream(
-                    prompt: prompt,
-                    images: images,
-                    system: system,
-                    template: template,
-                    suffix: suffix,
-                    model: model,
-                    format: format,
-                    options: options,
-                    raw: raw,
-                    think: think,
-                    keepAlive: keepAlive
-                ) {
-                    if case .delta = event { chunkCount += 1 }
-                    await send(event, requestId: requestId, deviceId: deviceId, server: server)
-                }
-            } else {
-                for event in try await proxy.generate(
-                    prompt: prompt,
-                    images: images,
-                    system: system,
-                    template: template,
-                    suffix: suffix,
-                    model: model,
-                    format: format,
-                    options: options,
-                    raw: raw,
-                    think: think,
-                    keepAlive: keepAlive
-                ) {
-                    if case .delta = event { chunkCount += 1 }
-                    await send(event, requestId: requestId, deviceId: deviceId, server: server)
-                }
-            }
-            print("[AppRouter] Generate complete for \(requestId.prefix(8)): \(chunkCount) chunk(s)")
-            await server.send(["type": "done", "requestId": requestId], to: deviceId)
-            print("[AppRouter] done sent for \(requestId.prefix(8))")
-        } catch {
-            print("[AppRouter] Generate error for \(requestId.prefix(8)): \(error)")
-            await server.send(["type": "error", "requestId": requestId, "message": error.localizedDescription], to: deviceId)
-        }
+        guard await ensureModelReady(for: messagesRaw, requestId: requestId, deviceId: deviceId, server: server) else { return }
+
+        let stream = await mlxEngine.chatStream(messages: messagesRaw, tools: [], options: options)
+        await drain(stream, requestId: requestId, deviceId: deviceId, server: server, label: "Generate")
     }
 
     // MARK: - Speech handlers
@@ -382,21 +308,9 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
     /// beats buffering it unboundedly.
     private static let maxUploadBytes = 10 * 1024 * 1024
 
-    /// Speech requests are gated on the backend being enabled and reachable — and
-    /// deliberately *not* on model-list membership, the way `handleRequest` gates chat.
-    /// Some servers happily accept models they do not list, so gating there would produce
-    /// false negatives; a 4xx from the backend surfaces as a clean error instead.
     private func speechReady(requestId: String, deviceId: String, server: PeerServer) async -> Bool {
-        let (enabled, status) = await MainActor.run {
-            (AppSettings.shared.speechEnabled, speechMonitor.status)
-        }
-        if !enabled {
+        guard await MainActor.run(body: { AppSettings.shared.speechEnabled }) else {
             await fail(requestId, "Speech is not enabled in BigBro Settings.", deviceId: deviceId, server: server)
-            return false
-        }
-        if status != .running {
-            await fail(requestId, "Speech backend not reachable at \(AppSettings.speechBaseURL).",
-                       deviceId: deviceId, server: server)
             return false
         }
         return true
@@ -415,33 +329,26 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         }
         guard await speechReady(requestId: requestId, deviceId: deviceId, server: server) else { return }
 
-        let voice  = message["voice"] as? String
-        let model  = message["model"] as? String
-        let format = message["response_format"] as? String
-        let speed  = message["speed"] as? Double
-
-        let resolved = await MainActor.run { () -> (format: String, voice: String, model: String) in
-            let s = AppSettings.shared
-            return (format ?? s.ttsFormat, voice ?? s.ttsVoice, model ?? s.ttsModel)
-        }
+        let voice = message["voice"] as? String
+        let speed = message["speed"] as? Double
+        let resolvedVoice = await MainActor.run { voice?.isEmpty == false ? voice! : AppSettings.shared.ttsVoice }
 
         do {
             // Headerless PCM describes nothing about itself, so the client is told the
             // format up front — it needs the rate and channel count to configure playback
-            // before the first chunk lands.
+            // before the first chunk lands. Always pcm/24kHz/mono now — Kokoro has no other
+            // output shape, so there is nothing left to negotiate here.
             await server.send([
                 "type": "audioStart",
                 "requestId": requestId,
-                "format": resolved.format,
-                "sampleRate": 24_000,  // OpenAI's pcm rate; containers carry their own
+                "format": "pcm",
+                "sampleRate": SpeechEngine.sampleRate,
                 "channels": 1,
-                "model": resolved.model,
-                "voice": resolved.voice,
+                "voice": resolvedVoice,
             ], to: deviceId)
 
             var seq = 0
-            for try await chunk in proxy.synthesize(input: input, voice: voice, model: model,
-                                                    responseFormat: format, speed: speed) {
+            for try await chunk in await speechEngine.synthesize(text: input, voice: voice, speed: speed) {
                 guard await server.isConnected(deviceId: deviceId) else {
                     print("[AppRouter] Peer \(deviceId.prefix(8)) gone, abandoning speech \(requestId.prefix(8))")
                     return
@@ -480,13 +387,10 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
             return
         }
 
-        let format   = message["audioFormat"] as? String ?? "wav"
-        let model    = message["model"] as? String
-        let language = message["language"] as? String
+        let format = message["audioFormat"] as? String ?? "wav"
 
         do {
-            let result = try await proxy.transcribe(audio: audio, format: format,
-                                                    model: model, language: language)
+            let result = try await speechEngine.transcribe(audio: audio, format: format)
             print("[AppRouter] Transcript for \(requestId.prefix(8)): \(result.text.count) chars")
             var reply: [String: Any] = [
                 "type": "transcript",

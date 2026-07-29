@@ -2,21 +2,17 @@ import SwiftUI
 
 struct DeviceListView: View {
     @EnvironmentObject var pairingManager: PairingManager
-    @EnvironmentObject var ollamaMonitor: OllamaMonitor
-    @EnvironmentObject var speechMonitor: SpeechMonitor
+    @EnvironmentObject var mlxEngine: MLXEngine
+    @EnvironmentObject var speechEngine: SpeechEngine
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
-        if ollamaMonitor.status == .unreachable {
-            Label("Inference backend not running", systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.orange)
-                .font(.caption)
-        }
-
-        // Gated on .unreachable, which SpeechMonitor only reports when speech is enabled —
-        // users who never turn it on never see this.
-        if speechMonitor.status == .unreachable {
-            Label("Speech backend not running", systemImage: "exclamationmark.triangle")
+        // Gated on .unreachable, which SpeechEngine only reports when speech is enabled and
+        // failed to load — users who never turn it on never see this. MLXEngine has no
+        // equivalent banner: it runs in-process, so there is no "not running" state, only
+        // "not downloaded yet" (surfaced in Settings instead).
+        if speechEngine.status == .unreachable {
+            Label("Speech models failed to load", systemImage: "exclamationmark.triangle")
                 .foregroundStyle(.orange)
                 .font(.caption)
         }
@@ -27,7 +23,6 @@ struct DeviceListView: View {
             ForEach(pairingManager.approvedDevices.sorted(), id: \.self) { deviceId in
                 DeviceMenuRow(deviceId: deviceId)
                     .environmentObject(pairingManager)
-                    .environmentObject(ollamaMonitor)
             }
         }
 
@@ -48,7 +43,6 @@ struct DeviceListView: View {
 
 private struct DeviceMenuRow: View {
     @EnvironmentObject var pairingManager: PairingManager
-    @EnvironmentObject var ollamaMonitor: OllamaMonitor
     let deviceId: String
 
     var body: some View {

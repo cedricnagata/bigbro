@@ -4,15 +4,11 @@ import Combine
 
 /// Plays a synthesized sample on the Mac, so a voice can be auditioned from Settings without
 /// a paired device or the peer protocol in the loop.
-///
-/// Requests `wav` rather than the configured wire format: AVAudioPlayer needs a container,
-/// and the `pcm` default is deliberately headerless.
 @MainActor
 final class SpeechPreview: ObservableObject {
     @Published private(set) var isSynthesizing = false
     @Published private(set) var error: String?
 
-    private let proxy = OpenAIProxy()
     /// Retained deliberately — a released AVAudioPlayer stops mid-playback.
     private var player: AVAudioPlayer?
 
@@ -25,11 +21,7 @@ final class SpeechPreview: ObservableObject {
             guard let self else { return }
             defer { self.isSynthesizing = false }
             do {
-                let audio = try await self.proxy.synthesizeAll(
-                    input: sample,
-                    voice: voice,
-                    responseFormat: "wav"
-                )
+                let audio = try await SpeechEngine.shared.synthesizePreviewWAV(voice: voice, sample: sample)
                 let player = try AVAudioPlayer(data: audio)
                 self.player = player
                 player.play()

@@ -10,7 +10,6 @@ final class PairingManager: ObservableObject {
     @Published var connectedDeviceIds: Set<String> = []
 
     weak var peerServer: PeerServer?
-    weak var ollamaMonitor: OllamaMonitor?
     weak var modelDownloader: ModelDownloader?
 
     @Published var deviceRequiredModels: [String: [String]] = [:]
@@ -100,9 +99,12 @@ final class PairingManager: ObservableObject {
         }
     }
 
+    /// A client's `requiredModels` are legacy Ollama-style tags (`gpt-oss:20b`,
+    /// `qwen3-vl:30b`); BigBro no longer has models by those names, so each is mapped onto
+    /// whichever of the two fixed local models it most plausibly refers to (see
+    /// `MLXEngine.isRequiredModelSatisfied`) rather than matched by exact string.
     private func missingModels(requiredModels: [String]) -> [String] {
-        guard let monitor = ollamaMonitor, monitor.status == .running else { return [] }
-        return monitor.missingModels(from: requiredModels)
+        requiredModels.filter { !MLXEngine.shared.isRequiredModelSatisfied($0) }
     }
 
     private func promptModelDownloadIfNeeded(deviceName: String, missing: [String]) {
@@ -110,14 +112,18 @@ final class PairingManager: ObservableObject {
 
         let alert = NSAlert()
         alert.messageText = "Missing Models"
-        alert.informativeText = "\(deviceName) requires the following model\(missing.count == 1 ? "" : "s") that aren't downloaded in Ollama:\n\n\(missing.joined(separator: "\n"))"
+        alert.informativeText = "\(deviceName) requires the following model\(missing.count == 1 ? "" : "s") that aren't downloaded yet:\n\n\(missing.joined(separator: "\n"))"
         alert.addButton(withTitle: "Download All")
         alert.addButton(withTitle: "Later")
         alert.alertStyle = .informational
         NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn {
-            for model in missing {
-                modelDownloader?.startDownload(model)
+            // Start by canonical model name, not the client's declared string — that's the
+            // same key `AppRouter` and `ModelDownloader.progress` use, so this can't kick off
+            // a second, differently-keyed download for the model AppRouter is already pulling.
+            let kinds = Set(missing.map { MLXEngine.ModelKind.matching(declaredName: $0) })
+            for kind in kinds {
+                modelDownloader?.startDownload(kind.displayName)
             }
         }
     }
@@ -161,8 +167,8 @@ final class PairingManager: ObservableObject {
         }
     }
 
-    /// Called when Ollama's installed model list changes. Pushes updated missing-model
-    /// lists to all connected devices that declared required models.
+    /// Called when a local model finishes downloading. Pushes updated missing-model lists to
+    /// all connected devices that declared required models.
     func pushModelsUpdate() {
         guard let server = peerServer else { return }
         for deviceId in connectedDeviceIds {
