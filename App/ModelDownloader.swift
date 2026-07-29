@@ -1,35 +1,34 @@
 import Foundation
 import Combine
 
-/// Drives `ollama pull` for missing models and publishes per-model progress.
-/// Throttled progress updates (~1/sec) are emitted via a Combine publisher so
-/// both the Mac UI and the peer broadcaster can subscribe without flooding.
+/// Drives installation of missing models and publishes per-model progress.
+///
+/// Throttled progress updates (~1/sec) are emitted via a Combine publisher so both the Mac
+/// UI and the peer broadcaster can subscribe without flooding.
+///
+/// The transport lives behind `ModelInstalling` — Ollama streams NDJSON from `/api/pull`,
+/// LocalAI polls a gallery job — so this type only coordinates state and throttling.
 @MainActor
 final class ModelDownloader: ObservableObject {
-    struct Progress: Equatable {
-        var status: String           // "downloading", "verifying digest", etc.
-        var bytesCompleted: Int64
-        var bytesTotal: Int64
-        var done: Bool
-        var error: String?
+    /// Kept as a nested name so existing call sites read unchanged.
+    typealias Progress = ModelInstallProgress
 
-        var percent: Double {
-            bytesTotal > 0 ? Double(bytesCompleted) / Double(bytesTotal) : 0
-        }
-    }
-
-    /// Map of model → current progress. Models that finished or errored are
-    /// removed shortly after completion.
+    /// Map of model → current progress. Models that finished or errored are removed shortly
+    /// after completion.
     @Published private(set) var progress: [String: Progress] = [:]
 
     /// Fires every time a per-model progress entry mutates. Subscribers get
-    /// (model, progress) — useful for broadcasting to peers without diffing
-    /// the whole map.
+    /// (model, progress) — useful for broadcasting to peers without diffing the whole map.
     let updates = PassthroughSubject<(model: String, progress: Progress), Never>()
 
+    private let installer: ModelInstalling
     private var tasks: [String: Task<Void, Never>] = [:]
     private var lastEmitted: [String: Date] = [:]
     private let throttleInterval: TimeInterval = 1.0
+
+    init(installer: ModelInstalling = OllamaInstaller()) {
+        self.installer = installer
+    }
 
     var activeModels: Set<String> {
         Set(tasks.keys)
@@ -39,8 +38,8 @@ final class ModelDownloader: ObservableObject {
         tasks[model] != nil
     }
 
-    /// Starts a pull for the given model. Returns true if a new download was
-    /// started, false if one was already in progress.
+    /// Starts an install for the given model. Returns true if a new install was started,
+    /// false if one was already in progress.
     @discardableResult
     func startDownload(_ model: String) -> Bool {
         guard tasks[model] == nil else {
@@ -73,73 +72,36 @@ final class ModelDownloader: ObservableObject {
 
     private func run(model: String) async {
         defer { tasks[model] = nil }
-        var current = progress[model] ?? Progress(status: "starting", bytesCompleted: 0, bytesTotal: 0, done: false, error: nil)
-        var perDigest: [String: (completed: Int64, total: Int64)] = [:]
-
+        var current = progress[model] ?? Progress(status: "starting", bytesCompleted: 0,
+                                                  bytesTotal: 0, done: false, error: nil)
         do {
-            guard let url = AppSettings.shared.pullURL else {
-                throw NSError(domain: "ModelDownloader", code: -1, userInfo: [NSLocalizedDescriptionKey: "Ollama URL is not configured"])
-            }
-            var req = URLRequest(url: url)
-            req.httpMethod = "POST"
-            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            req.httpBody = try JSONSerialization.data(withJSONObject: ["name": model, "stream": true])
-            req.timeoutInterval = 3600  // pulls can take a long time
-
-            let (bytes, response) = try await URLSession.shared.bytes(for: req)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-                throw NSError(domain: "ModelDownloader", code: code, userInfo: [NSLocalizedDescriptionKey: "Ollama returned HTTP \(code)"])
-            }
-
-            for try await line in bytes.lines {
+            for try await update in installer.install(model) {
                 if Task.isCancelled { break }
-                guard !line.isEmpty,
-                      let data = line.data(using: .utf8),
-                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                else { continue }
+                current = update
+                progress[model] = current
+                emit(model: model, progress: current, force: current.done)
 
-                if let err = json["error"] as? String {
-                    throw NSError(domain: "ModelDownloader", code: -1, userInfo: [NSLocalizedDescriptionKey: err])
-                }
-
-                let status = (json["status"] as? String) ?? current.status
-                if let digest = json["digest"] as? String,
-                   let total = (json["total"] as? Int64) ?? (json["total"] as? Int).map(Int64.init) {
-                    let completed = (json["completed"] as? Int64) ?? (json["completed"] as? Int).map(Int64.init) ?? 0
-                    perDigest[digest] = (completed: completed, total: total)
-                }
-
-                let totalBytes = perDigest.values.reduce(Int64(0)) { $0 + $1.total }
-                let doneBytes = perDigest.values.reduce(Int64(0)) { $0 + $1.completed }
-
-                current.status = status
-                current.bytesCompleted = doneBytes
-                current.bytesTotal = totalBytes
-
-                if status == "success" {
-                    current.done = true
-                    current.bytesCompleted = totalBytes
-                    progress[model] = current
-                    emit(model: model, progress: current, force: true)
-                    print("[ModelDownloader] \(model) complete")
-                    // Drop from the published map shortly so UI clears.
-                    Task { @MainActor [weak self] in
-                        try? await Task.sleep(for: .seconds(2))
-                        self?.progress.removeValue(forKey: model)
+                if current.done {
+                    if let error = current.error {
+                        print("[ModelDownloader] \(model) failed: \(error)")
+                    } else {
+                        print("[ModelDownloader] \(model) complete")
                     }
+                    scheduleClear(model)
                     return
-                } else {
-                    progress[model] = current
-                    emit(model: model, progress: current, force: false)
                 }
             }
-            // Stream ended without "success" — treat as failure.
+            if Task.isCancelled {
+                print("[ModelDownloader] \(model) cancelled")
+                return
+            }
+            // The installer finished without ever reporting a terminal update.
             current.done = true
             current.error = "download ended unexpectedly"
             progress[model] = current
             emit(model: model, progress: current, force: true)
             print("[ModelDownloader] \(model) ended without success")
+            scheduleClear(model)
         } catch is CancellationError {
             print("[ModelDownloader] \(model) cancelled")
         } catch {
@@ -148,14 +110,17 @@ final class ModelDownloader: ObservableObject {
             current.error = error.localizedDescription
             progress[model] = current
             emit(model: model, progress: current, force: true)
+            scheduleClear(model)
         }
+    }
 
-        // Clear failed entry after a short delay so the UI can show the error.
+    /// Drops a finished entry after a beat, so the UI can show the terminal state first.
+    /// Failures linger longer than successes so the message is readable.
+    private func scheduleClear(_ model: String) {
+        let failed = progress[model]?.error != nil
         Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(4))
-            if self?.progress[model]?.error != nil {
-                self?.progress.removeValue(forKey: model)
-            }
+            try? await Task.sleep(for: .seconds(failed ? 4 : 2))
+            self?.progress.removeValue(forKey: model)
         }
     }
 
