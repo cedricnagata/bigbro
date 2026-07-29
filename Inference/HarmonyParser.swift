@@ -29,7 +29,7 @@ final class HarmonyStreamParser {
         case toolCall(name: String, argumentsJSON: String)
     }
 
-    private enum Channel {
+    enum Channel {
         case analysis
         case final
         case commentary(recipient: String?)
@@ -176,7 +176,7 @@ final class HarmonyStreamParser {
     }
 }
 
-private extension HarmonyStreamParser.Channel {
+extension HarmonyStreamParser.Channel {
     var isAnalysis: Bool {
         if case .analysis = self { return true }
         return false

@@ -1,9 +1,13 @@
 import Foundation
+import Combine
 import CoreImage
 import MLX
 import MLXLLM
 import MLXVLM
 import MLXLMCommon
+import MLXHuggingFace
+import HuggingFace
+import Tokenizers
 
 // MARK: - Shared error / event types
 
@@ -131,26 +135,28 @@ final class MLXEngine: ObservableObject, BackendStatusReporting {
         let task = Task<ModelContainer, Error> { [weak self] in
             guard let self else { throw CancellationError() }
             do {
+                let progressHandler: @Sendable (Progress) -> Void = { progress in
+                    Task { @MainActor in
+                        self.loadProgress[kind] = progress.fractionCompleted
+                        onProgress?(progress.fractionCompleted)
+                    }
+                }
                 let container: ModelContainer
                 switch kind {
                 case .text:
                     container = try await LLMModelFactory.shared.loadContainer(
-                        configuration: kind.configuration
-                    ) { progress in
-                        Task { @MainActor in
-                            self.loadProgress[kind] = progress.fractionCompleted
-                            onProgress?(progress.fractionCompleted)
-                        }
-                    }
+                        from: #hubDownloader(),
+                        using: #huggingFaceTokenizerLoader(),
+                        configuration: kind.configuration,
+                        progressHandler: progressHandler
+                    )
                 case .vision:
                     container = try await VLMModelFactory.shared.loadContainer(
-                        configuration: kind.configuration
-                    ) { progress in
-                        Task { @MainActor in
-                            self.loadProgress[kind] = progress.fractionCompleted
-                            onProgress?(progress.fractionCompleted)
-                        }
-                    }
+                        from: #hubDownloader(),
+                        using: #huggingFaceTokenizerLoader(),
+                        configuration: kind.configuration,
+                        progressHandler: progressHandler
+                    )
                 }
                 await MainActor.run {
                     self.containers[kind] = container

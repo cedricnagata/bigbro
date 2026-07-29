@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import AVFoundation
 import FluidAudio
 
@@ -20,7 +21,7 @@ final class SpeechEngine: ObservableObject, BackendStatusReporting {
     @Published private(set) var isReady = false
     @Published private(set) var loadError: String?
 
-    private var tts: KokoroAneManager?
+    private var tts: KokoroTtsManager?
     private var asr: AsrManager?
     private var loadingTask: Task<Void, Never>?
 
@@ -51,12 +52,12 @@ final class SpeechEngine: ObservableObject, BackendStatusReporting {
             let task = Task { @MainActor [weak self] in
                 guard let self else { return }
                 do {
-                    let ttsManager = KokoroAneManager()
+                    let ttsManager = KokoroTtsManager()
                     try await ttsManager.initialize()
 
                     let models = try await AsrModels.downloadAndLoad(version: .v3)
                     let asrManager = AsrManager(config: .default)
-                    try await asrManager.loadModels(models)
+                    try await asrManager.initialize(models: models)
 
                     self.tts = ttsManager
                     self.asr = asrManager
@@ -94,13 +95,17 @@ final class SpeechEngine: ObservableObject, BackendStatusReporting {
                         throw InferenceError.modelNotSelected(capability: "speech")
                     }
                     let result = try await tts.synthesizeDetailed(
-                        text: text, voice: resolvedVoice, speed: Float(speed ?? 1.0)
+                        text: text, voice: resolvedVoice, voiceSpeed: Float(speed ?? 1.0)
                     )
-                    let pcm = Self.pcm16Data(from: result.samples)
+                    // `result.audio` is a full WAV file (44-byte header + 16-bit mono PCM at
+                    // Self.sampleRate) — strip the header for the wire protocol, which sends
+                    // headerless raw PCM so BigBroAudioPlayer can split it at arbitrary byte
+                    // boundaries.
+                    let pcm = result.audio.dropFirst(Self.wavHeaderBytes)
 
-                    var offset = 0
-                    while offset < pcm.count {
-                        let end = min(offset + Self.chunkBytes, pcm.count)
+                    var offset = pcm.startIndex
+                    while offset < pcm.endIndex {
+                        let end = min(offset + Self.chunkBytes, pcm.endIndex)
                         continuation.yield(pcm.subdata(in: offset..<end))
                         offset = end
                     }
@@ -112,15 +117,14 @@ final class SpeechEngine: ObservableObject, BackendStatusReporting {
         }
     }
 
-    /// Collects a whole utterance into one WAV-wrapped buffer, for the Settings preview
-    /// (`AVAudioPlayer` needs a container; the wire protocol's raw PCM is headerless by
-    /// design so BigBroAudioPlayer can split it at arbitrary byte boundaries).
+    /// A whole utterance as a WAV-wrapped buffer, for the Settings preview (`AVAudioPlayer`
+    /// needs a container; the wire protocol strips this same header for its headerless PCM).
     func synthesizePreviewWAV(voice: String, sample: String) async throws -> Data {
-        var pcm = Data()
-        for try await chunk in synthesize(text: sample, voice: voice) {
-            pcm.append(chunk)
+        try await ensureLoaded()
+        guard let tts else {
+            throw InferenceError.generationFailed("Text-to-speech is not loaded.")
         }
-        return Self.wavData(from: pcm, sampleRate: Self.sampleRate)
+        return try await tts.synthesize(text: sample, voice: voice)
     }
 
     // MARK: - Transcription
@@ -131,48 +135,16 @@ final class SpeechEngine: ObservableObject, BackendStatusReporting {
             throw InferenceError.generationFailed("Speech-to-text is not loaded.")
         }
         let samples = try Self.floatSamples(from: audio, format: format)
-        let result = try await asr.transcribe(samples)
+        let result = try await asr.transcribe(samples, source: .system)
         return (result.text, nil)
     }
 
     // MARK: - Audio conversion
 
-    private static func pcm16Data(from samples: [Float]) -> Data {
-        var data = Data(capacity: samples.count * 2)
-        for sample in samples {
-            let clamped = max(-1.0, min(1.0, sample))
-            var intSample = Int16(clamped * Float(Int16.max)).littleEndian
-            withUnsafeBytes(of: &intSample) { data.append(contentsOf: $0) }
-        }
-        return data
-    }
-
-    private static func wavData(from pcm16: Data, sampleRate: Int) -> Data {
-        var header = Data()
-        func append32(_ v: UInt32) {
-            var le = v.littleEndian
-            withUnsafeBytes(of: &le) { header.append(contentsOf: $0) }
-        }
-        func append16(_ v: UInt16) {
-            var le = v.littleEndian
-            withUnsafeBytes(of: &le) { header.append(contentsOf: $0) }
-        }
-        let byteRate = sampleRate * 2  // mono, 16-bit
-        header.append(contentsOf: Array("RIFF".utf8))
-        append32(UInt32(36 + pcm16.count))
-        header.append(contentsOf: Array("WAVE".utf8))
-        header.append(contentsOf: Array("fmt ".utf8))
-        append32(16)
-        append16(1)  // PCM
-        append16(1)  // mono
-        append32(UInt32(sampleRate))
-        append32(UInt32(byteRate))
-        append16(2)   // block align
-        append16(16)  // bits per sample
-        header.append(contentsOf: Array("data".utf8))
-        append32(UInt32(pcm16.count))
-        return header + pcm16
-    }
+    /// `AudioWAV.data(from:sampleRate:)` (FluidAudio/Shared/AudioConverter.swift) always
+    /// writes a canonical 44-byte PCM WAV header (RIFF+WAVE, one `fmt ` chunk, one `data`
+    /// chunk — no extra chunks), so stripping a fixed offset is exact, not a guess.
+    private static let wavHeaderBytes = 44
 
     /// Decodes an arbitrary container (wav/m4a/etc, whatever the client sent) down to 16 kHz
     /// mono Float32 samples — what Parakeet expects — via a one-shot `AVAudioConverter` pass.

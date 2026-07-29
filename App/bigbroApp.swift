@@ -186,14 +186,14 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         deviceId: String,
         server: PeerServer
     ) async -> Bool {
-        let kind = await mlxEngine.kind(for: messages)
-        if await mlxEngine.isDownloaded(kind) { return true }
+        let kind = mlxEngine.kind(for: messages)
+        if mlxEngine.isDownloaded(kind) { return true }
 
         let modelName = kind.displayName
-        let alreadyInProgress = await MainActor.run { modelDownloader.isDownloading(modelName) }
+        let alreadyInProgress = modelDownloader.isDownloading(modelName)
         if !alreadyInProgress {
             print("[AppRouter] Model '\(modelName)' missing — starting download for \(deviceId.prefix(8))")
-            await MainActor.run { modelDownloader.startDownload(modelName) }
+            modelDownloader.startDownload(modelName)
         } else {
             print("[AppRouter] Model '\(modelName)' already downloading — informing \(deviceId.prefix(8))")
         }
@@ -272,7 +272,7 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
 
         guard await ensureModelReady(for: messagesRaw, requestId: requestId, deviceId: deviceId, server: server) else { return }
 
-        let stream = await mlxEngine.chatStream(messages: messagesRaw, tools: tools, options: options)
+        let stream = mlxEngine.chatStream(messages: messagesRaw, tools: tools, options: options)
         await drain(stream, requestId: requestId, deviceId: deviceId, server: server, label: "Request")
     }
 
@@ -298,7 +298,7 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
 
         guard await ensureModelReady(for: messagesRaw, requestId: requestId, deviceId: deviceId, server: server) else { return }
 
-        let stream = await mlxEngine.chatStream(messages: messagesRaw, tools: [], options: options)
+        let stream = mlxEngine.chatStream(messages: messagesRaw, tools: [], options: options)
         await drain(stream, requestId: requestId, deviceId: deviceId, server: server, label: "Generate")
     }
 
@@ -348,7 +348,7 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
             ], to: deviceId)
 
             var seq = 0
-            for try await chunk in await speechEngine.synthesize(text: input, voice: voice, speed: speed) {
+            for try await chunk in speechEngine.synthesize(text: input, voice: voice, speed: speed) {
                 guard await server.isConnected(deviceId: deviceId) else {
                     print("[AppRouter] Peer \(deviceId.prefix(8)) gone, abandoning speech \(requestId.prefix(8))")
                     return
