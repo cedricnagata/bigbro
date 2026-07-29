@@ -89,11 +89,11 @@ private struct GeneralSettingsTab: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
-                    BackendModelField(
+                    BackendModelPicker(
                         title: "Speech Model",
                         value: $settings.ttsModel,
                         options: speechMonitor.availableModels,
-                        help: "The installed model that performs synthesis. LocalAI names these from its gallery — chatterbox, piper, kokoro — not `tts-1`, which is an OpenAI-only alias."
+                        help: "The installed model that performs synthesis — LocalAI names these from its gallery, e.g. kokoro, piper, chatterbox."
                     )
 
                     LabeledContent("Audio Format") {
@@ -106,7 +106,7 @@ private struct GeneralSettingsTab: View {
                         .frame(maxWidth: .infinity, alignment: .trailing)
                     }
 
-                    BackendModelField(
+                    BackendModelPicker(
                         title: "Transcription Model",
                         value: $settings.sttModel,
                         options: speechMonitor.availableModels,
@@ -134,16 +134,16 @@ private struct GeneralSettingsTab: View {
     }
 }
 
-/// A model identifier, with a menu of what the backend actually reports.
+/// Picks a model from the list the backend reports.
 ///
-/// Free-form because model names are backend-specific — LocalAI uses gallery names, Speaches
-/// uses Hugging Face ids, Kokoro-FastAPI just calls it `kokoro` — and not every server can list
-/// them. The menu and the warning exist because the common failure is a name the backend does
-/// not have, which otherwise only surfaces later as an HTTP 404 on the first request.
+/// A closed list rather than free text: model names are backend-specific — LocalAI uses gallery
+/// names, Speaches uses Hugging Face ids, Kokoro-FastAPI just says `kokoro` — so a typed name is
+/// almost always wrong, and it only fails later as an HTTP 404 on the first request. `/v1/models`
+/// is part of the OpenAI spec, so unlike the voice list it can be relied on.
 ///
-/// `/v1/models` reports every model the backend serves, chat models included; there is no
-/// capability tag to filter on, so the same list backs both the speech and transcription fields.
-private struct BackendModelField: View {
+/// That endpoint reports every model the backend serves, chat models included, and carries no
+/// capability tag to filter on — so the same list backs both the speech and transcription pickers.
+private struct BackendModelPicker: View {
     let title: String
     @Binding var value: String
     let options: [String]
@@ -152,20 +152,23 @@ private struct BackendModelField: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             LabeledContent(title) {
-                HStack(spacing: 6) {
-                    TextField("Pick one from Choose", text: $value)
-                        .labelsHidden()
-                        .frame(maxWidth: .infinity)
-
-                    if !options.isEmpty {
-                        Menu("Choose") {
-                            ForEach(options, id: \.self) { option in
-                                Button(option) { value = option }
-                            }
-                        }
-                        .fixedSize()
+                Picker(title, selection: $value) {
+                    if value.isEmpty {
+                        Text("Select a model…").tag("")
+                    } else if !options.contains(value) {
+                        // Keep an unrecognised value selected and visible rather than letting
+                        // the picker silently snap to the first option — the stale name is the
+                        // thing the warning below is about.
+                        Text("\(value) — not installed").tag(value)
+                        Divider()
+                    }
+                    ForEach(options, id: \.self) { option in
+                        Text(option).tag(option)
                     }
                 }
+                .labelsHidden()
+                .disabled(options.isEmpty)
+                .frame(maxWidth: .infinity, alignment: .trailing)
             }
 
             if let problem {
@@ -180,12 +183,12 @@ private struct BackendModelField: View {
         }
     }
 
-    /// Only meaningful once the backend has actually reported a list — an empty `options`
-    /// means unreachable or a server with no listing endpoint, not "nothing installed".
     private var problem: String? {
-        guard !options.isEmpty else { return nil }
+        if options.isEmpty {
+            return "The backend reported no models. Check it is reachable and has models installed."
+        }
         if value.isEmpty {
-            return "No model selected — pick one from Choose."
+            return "No model selected."
         }
         if !options.contains(value) {
             return "The backend does not list “\(value)”. Requests will fail with HTTP 404."

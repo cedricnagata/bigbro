@@ -67,9 +67,10 @@ These are two different things and both have to be right:
   `am_adam`, `bf_emma`; Piper has `en-us-amy-low`. A voice only means something to the model that
   defines it.
 
-BigBro populates the **Choose** menu next to each model field from the backend's `/v1/models`, and
-warns inline if the configured name is not in that list — so a wrong name shows up in Settings
-rather than as a 404 on the first request.
+The model fields are dropdowns populated from the backend's `/v1/models`, so a name that does not
+exist cannot be selected. The voice stays free-form: `/v1/audio/voices` is not part of the OpenAI
+spec, so plenty of backends do not expose it, and Piper-style voices and cloned voices are not
+enumerable at all.
 
 > **`model "tts-1" not found`** means the backend has no model by that name. Run
 > `curl http://localhost:8080/v1/models` to see what is installed. A fresh LocalAI has *no* models

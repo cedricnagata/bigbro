@@ -73,13 +73,23 @@ final class AppSettings: ObservableObject {
         let defaults = UserDefaults.standard
         defaultModel   = defaults.string(forKey: "bigbro.defaultModel") ?? "gpt-oss-20b"
         speechEnabled  = defaults.bool(forKey: "bigbro.speechEnabled")
-        // Model names are backend-specific and there is no portable default: `tts-1` and
-        // `whisper-1` are OpenAI-only aliases, LocalAI uses gallery names, Speaches uses
-        // Hugging Face ids. Start empty so Settings prompts for a real choice from
-        // /v1/models rather than shipping a name that 404s on most backends.
-        ttsModel       = defaults.string(forKey: "bigbro.ttsModel") ?? ""
+        ttsModel       = Self.installableModel(defaults.string(forKey: "bigbro.ttsModel"))
         ttsVoice       = defaults.string(forKey: "bigbro.ttsVoice") ?? "af_heart"
         ttsFormat      = defaults.string(forKey: "bigbro.ttsFormat") ?? "pcm"
-        sttModel       = defaults.string(forKey: "bigbro.sttModel") ?? ""
+        sttModel       = Self.installableModel(defaults.string(forKey: "bigbro.sttModel"))
+    }
+
+    /// Names that only exist on OpenAI's own service. No local backend serves them: LocalAI
+    /// names models from its gallery, Speaches uses Hugging Face ids, Kokoro-FastAPI just says
+    /// `kokoro`. There is no portable default, so these are treated as unset.
+    ///
+    /// They briefly shipped as the defaults here, which means anyone who ran that build has one
+    /// persisted — and a stored value beats a code default, so simply changing the default
+    /// would not have dislodged it. Filtering on read does.
+    private static let openAIOnlyModelNames: Set<String> = ["tts-1", "tts-1-hd", "whisper-1"]
+
+    private static func installableModel(_ stored: String?) -> String {
+        guard let stored, !openAIOnlyModelNames.contains(stored) else { return "" }
+        return stored
     }
 }
