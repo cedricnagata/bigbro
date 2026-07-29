@@ -67,10 +67,11 @@ them.
 Open **Settings** (⌘,) for two tabs:
 
 **General**
-- **Models** — one row per fixed local model: not downloaded / downloading (%) / loaded, with a
-  **Download** button
-- **Speech** — off by default; when enabled, shows load status, a free-form Kokoro voice field
-  (e.g. `af_heart`), and **Preview**
+- **Text** — one row per fixed text/vision model (gpt-oss-20b, Qwen2.5-VL-3B): not downloaded /
+  downloading (%) / loaded, with a **Download** button
+- **Speech** — off by default; when enabled, shows one row per speech model (Kokoro, Parakeet)
+  with its own download progress, plus a free-form Kokoro voice field (e.g. `af_heart`) and
+  **Preview**
 
 **Devices** — paired device management:
 - Each connected device shows its required models, each mapped to the local model that satisfies it, with install status (✓ / ✗)
@@ -160,7 +161,6 @@ bigbro/
 │   └── PowerAssertion.swift    — keeps the Mac awake while peers are connected
 └── UI/
     ├── DeviceListView.swift     — menu bar device list with model status
-    ├── BackendStatusView.swift  — reusable backend status indicator
     ├── SpeechPreview.swift      — auditions a voice locally via AVAudioPlayer
-    └── SettingsView.swift       — settings tabs (models, speech, devices)
+    └── SettingsView.swift       — settings tabs (text models, speech models, devices)
 ```

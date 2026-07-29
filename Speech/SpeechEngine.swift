@@ -7,6 +7,10 @@ import FluidAudio
 /// replacing the LocalAI OpenAI-compatible proxy. Both models are CoreML/Neural-Engine —
 /// no relation to the MLX text/vision models in `MLXEngine`, so they load independently.
 ///
+/// Kokoro and Parakeet are tracked as two independent `ModelKind`s — mirroring
+/// `MLXEngine.ModelKind` — rather than one atomic "speech is ready" flag, so Settings can show
+/// per-model download progress and one failing does not block the other from working.
+///
 /// `AppRouter`'s speech handlers are unchanged in shape: `synthesize` still streams `Data`
 /// chunks and `transcribe` still returns `(text:, language:)`. Only the format contract
 /// tightens — synthesis is always 24 kHz 16-bit mono PCM now, because that is the only format
@@ -18,12 +22,26 @@ final class SpeechEngine: ObservableObject, BackendStatusReporting {
     static let sampleRate = 24_000
     private static let chunkBytes = 8 * 1024
 
-    @Published private(set) var isReady = false
-    @Published private(set) var loadError: String?
+    enum ModelKind: String, CaseIterable {
+        case tts
+        case stt
+
+        var displayName: String {
+            switch self {
+            case .tts: return "Kokoro (Speech)"
+            case .stt: return "Parakeet (Transcription)"
+            }
+        }
+
+        fileprivate var readyDefaultsKey: String { "bigbro.speechModelReady.\(rawValue)" }
+    }
+
+    @Published private(set) var loadProgress: [ModelKind: Double] = [:]
+    @Published private(set) var loadErrors: [ModelKind: String] = [:]
 
     private var tts: KokoroTtsManager?
     private var asr: AsrManager?
-    private var loadingTask: Task<Void, Never>?
+    private var loadingTasks: [ModelKind: Task<Void, Never>] = [:]
 
     private init() {}
 
@@ -31,49 +49,75 @@ final class SpeechEngine: ObservableObject, BackendStatusReporting {
 
     var status: BackendStatus {
         guard AppSettings.shared.speechEnabled else { return .disabled }
-        if loadError != nil { return .unreachable }
-        return isReady ? .running : .unknown
+        if ModelKind.allCases.contains(where: { loadErrors[$0] != nil }) { return .unreachable }
+        return ModelKind.allCases.allSatisfy(isLoaded) ? .running : .unknown
     }
 
     var runningSummary: String { "Running" }
     var detailItems: [String] { [] }
     var unreachableHint: String {
-        loadError.map { "Speech models failed to load: \($0)" } ?? "Speech models not loaded yet"
+        let firstError = ModelKind.allCases.compactMap { loadErrors[$0] }.first
+        return firstError.map { "Speech models failed to load: \($0)" } ?? "Speech models not loaded yet"
     }
 
-    // MARK: - Lifecycle
+    // MARK: - Model state
 
-    /// Loads Kokoro + Parakeet on first use. Cheap on repeat calls once loaded.
-    func ensureLoaded() async throws {
-        if isReady { return }
-        if let loadingTask {
-            await loadingTask.value
+    func isLoaded(_ kind: ModelKind) -> Bool {
+        switch kind {
+        case .tts: return tts != nil
+        case .stt: return asr != nil
+        }
+    }
+
+    /// Best-effort "has this been downloaded" check — true once a load has actually
+    /// completed, same discipline as `MLXEngine.isDownloaded` (not a cache-path guess that
+    /// could mistake a half-finished download for a complete one).
+    func isDownloaded(_ kind: ModelKind) -> Bool {
+        isLoaded(kind) || UserDefaults.standard.bool(forKey: kind.readyDefaultsKey)
+    }
+
+    @discardableResult
+    func ensureLoaded(_ kind: ModelKind) async throws -> Bool {
+        if isLoaded(kind) { return true }
+
+        if let existing = loadingTasks[kind] {
+            await existing.value
         } else {
             let task = Task { @MainActor [weak self] in
                 guard let self else { return }
                 do {
-                    let ttsManager = KokoroTtsManager()
-                    try await ttsManager.initialize()
-
-                    let models = try await AsrModels.downloadAndLoad(version: .v3)
-                    let asrManager = AsrManager(config: .default)
-                    try await asrManager.initialize(models: models)
-
-                    self.tts = ttsManager
-                    self.asr = asrManager
-                    self.isReady = true
-                    self.loadError = nil
+                    switch kind {
+                    case .tts:
+                        let models = try await TtsModels.download { progress in
+                            Task { @MainActor in self.loadProgress[kind] = progress.fractionCompleted }
+                        }
+                        let ttsManager = KokoroTtsManager()
+                        try await ttsManager.initialize(models: models)
+                        self.tts = ttsManager
+                    case .stt:
+                        let models = try await AsrModels.downloadAndLoad(version: .v3) { progress in
+                            Task { @MainActor in self.loadProgress[kind] = progress.fractionCompleted }
+                        }
+                        let asrManager = AsrManager(config: .default)
+                        try await asrManager.initialize(models: models)
+                        self.asr = asrManager
+                    }
+                    self.loadProgress[kind] = 1.0
+                    self.loadErrors[kind] = nil
+                    UserDefaults.standard.set(true, forKey: kind.readyDefaultsKey)
                 } catch {
-                    self.loadError = error.localizedDescription
+                    self.loadErrors[kind] = error.localizedDescription
                 }
-                self.loadingTask = nil
+                self.loadingTasks[kind] = nil
             }
-            loadingTask = task
+            loadingTasks[kind] = task
             await task.value
         }
-        if let loadError {
-            throw InferenceError.generationFailed(loadError)
+
+        if let error = loadErrors[kind] {
+            throw InferenceError.generationFailed(error)
         }
+        return true
     }
 
     // MARK: - Synthesis
@@ -86,7 +130,7 @@ final class SpeechEngine: ObservableObject, BackendStatusReporting {
         AsyncThrowingStream { continuation in
             Task {
                 do {
-                    try await self.ensureLoaded()
+                    try await self.ensureLoaded(.tts)
                     guard let tts = self.tts else {
                         throw InferenceError.generationFailed("Text-to-speech is not loaded.")
                     }
@@ -120,7 +164,7 @@ final class SpeechEngine: ObservableObject, BackendStatusReporting {
     /// A whole utterance as a WAV-wrapped buffer, for the Settings preview (`AVAudioPlayer`
     /// needs a container; the wire protocol strips this same header for its headerless PCM).
     func synthesizePreviewWAV(voice: String, sample: String) async throws -> Data {
-        try await ensureLoaded()
+        try await ensureLoaded(.tts)
         guard let tts else {
             throw InferenceError.generationFailed("Text-to-speech is not loaded.")
         }
@@ -130,7 +174,7 @@ final class SpeechEngine: ObservableObject, BackendStatusReporting {
     // MARK: - Transcription
 
     func transcribe(audio: Data, format: String) async throws -> (text: String, language: String?) {
-        try await ensureLoaded()
+        try await ensureLoaded(.stt)
         guard let asr else {
             throw InferenceError.generationFailed("Speech-to-text is not loaded.")
         }

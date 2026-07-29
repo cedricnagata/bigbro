@@ -17,9 +17,6 @@ struct SettingsView: View {
 
 private struct GeneralSettingsTab: View {
     @ObservedObject private var settings = AppSettings.shared
-    @EnvironmentObject var mlxEngine: MLXEngine
-    @EnvironmentObject var speechEngine: SpeechEngine
-    @EnvironmentObject var modelDownloader: ModelDownloader
     @StateObject private var preview = SpeechPreview()
 
     var body: some View {
@@ -29,7 +26,7 @@ private struct GeneralSettingsTab: View {
                     ModelRow(kind: kind)
                 }
             } header: {
-                Text("Models")
+                Text("Text")
             } footer: {
                 Label(
                     "gpt-oss-20b handles text and tool calls; Qwen2.5-VL-3B handles requests with images. Both run on this Mac — no separate server to install.",
@@ -43,9 +40,8 @@ private struct GeneralSettingsTab: View {
                 Toggle("Enable speech", isOn: $settings.speechEnabled)
 
                 if settings.speechEnabled {
-                    LabeledContent("Status") {
-                        BackendStatusView(monitor: speechEngine)
-                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    ForEach(SpeechEngine.ModelKind.allCases, id: \.self) { kind in
+                        SpeechModelRow(kind: kind)
                     }
 
                     LabeledContent("Voice") {
@@ -128,6 +124,51 @@ private struct ModelRow: View {
                 }
             } else if downloaded && !loaded {
                 Text("Downloaded — loads on first use")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+/// One row per speech model (Kokoro, Parakeet): its download/load state, and a button to
+/// fetch it. Mirrors `ModelRow`, but tracks state on `SpeechEngine` directly rather than
+/// through `ModelDownloader` — speech models aren't part of the wire protocol's
+/// required-model handshake, so there's no peer-facing download to coordinate.
+private struct SpeechModelRow: View {
+    @EnvironmentObject var speechEngine: SpeechEngine
+    let kind: SpeechEngine.ModelKind
+
+    var body: some View {
+        let loaded = speechEngine.isLoaded(kind)
+        let downloaded = speechEngine.isDownloaded(kind)
+        let progress = speechEngine.loadProgress[kind]
+        let error = speechEngine.loadErrors[kind]
+        let downloading = !loaded && error == nil && progress != nil
+
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Image(systemName: loaded ? "checkmark.circle.fill" : (downloading ? "arrow.down.circle" : (downloaded ? "checkmark.circle" : "xmark.circle.fill")))
+                    .foregroundStyle(loaded ? .green : (downloading ? .blue : (downloaded ? .green : .red)))
+                Text(kind.displayName)
+                Spacer(minLength: 8)
+                if !loaded && !downloading {
+                    Button("Download") {
+                        Task { try? await speechEngine.ensureLoaded(kind) }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+            if let error {
+                Text("Error: \(error)")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            } else if downloading, let progress {
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+                    .controlSize(.mini)
+                Text("\(Int((progress * 100).rounded()))%")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }

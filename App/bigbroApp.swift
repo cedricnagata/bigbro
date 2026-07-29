@@ -61,12 +61,15 @@ final class AppModel: ObservableObject {
         pairingManager.modelDownloader = modelDownloader
 
         // Loading Kokoro + Parakeet is not free, so it only happens once the user actually
-        // opts in — never eagerly at launch.
+        // opts in — but that includes "already opted in": `$speechEnabled` publishes its
+        // current value immediately on subscription, so if speech was left on from a
+        // previous launch this fires right away rather than needing a fresh toggle.
+        // `ensureLoaded` is idempotent, so re-firing on every `true` costs nothing.
         AppSettings.shared.$speechEnabled
-            .dropFirst()
             .filter { $0 }
             .sink { _ in
-                Task { try? await SpeechEngine.shared.ensureLoaded() }
+                Task { try? await SpeechEngine.shared.ensureLoaded(.tts) }
+                Task { try? await SpeechEngine.shared.ensureLoaded(.stt) }
             }
             .store(in: &cancellables)
 

@@ -9,12 +9,12 @@
 /* Begin PBXBuildFile section */
 		141991DF609B7754312A2D97 /* MLX in Frameworks */ = {isa = PBXBuildFile; productRef = E3BA184F2A0B3A04A495B7E9 /* MLX */; };
 		46A29E05D74C06622C8A2575 /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = 5B1A4CE6387B9134F5C88BD8 /* MLXLLM */; };
-		E0AE8A3F3FCA68E6686E266E /* MLXVLM in Frameworks */ = {isa = PBXBuildFile; productRef = 0A11B8729A5EB859E7E17D6B /* MLXVLM */; };
 		7F4AFAAA8AD3BA25ACC553ED /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = A4C9785C464B08862D99712E /* MLXLMCommon */; };
 		8B7814C209C4B726B6994EB7 /* FluidAudio in Frameworks */ = {isa = PBXBuildFile; productRef = 40D221FC0DA0E0D677678993 /* FluidAudio */; };
 		A8A2782D11E2933CAA0D5E84 /* MLXHuggingFace in Frameworks */ = {isa = PBXBuildFile; productRef = 4FC8795B96C218A9D8F9BC2E /* MLXHuggingFace */; };
-		DC625C0224AF3183F9877E77 /* HuggingFace in Frameworks */ = {isa = PBXBuildFile; productRef = B93AD358770CDCCBD5640F3B /* HuggingFace */; };
 		C069BC8C14A04D7CA8902FCC /* Tokenizers in Frameworks */ = {isa = PBXBuildFile; productRef = 5C2253DFC27F6E4DBE252C3F /* Tokenizers */; };
+		DC625C0224AF3183F9877E77 /* HuggingFace in Frameworks */ = {isa = PBXBuildFile; productRef = B93AD358770CDCCBD5640F3B /* HuggingFace */; };
+		E0AE8A3F3FCA68E6686E266E /* MLXVLM in Frameworks */ = {isa = PBXBuildFile; productRef = 0A11B8729A5EB859E7E17D6B /* MLXVLM */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -51,6 +51,11 @@
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		72840905B0B2A87E471815EB /* Speech */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Speech;
+			sourceTree = "<group>";
+		};
 		8B96FCAD2F9ADF8400A7D0D9 /* Server */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = Server;
@@ -77,11 +82,6 @@
 		CB38E23F1C1426597F293086 /* Inference */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = Inference;
-			sourceTree = "<group>";
-		};
-		72840905B0B2A87E471815EB /* Speech */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = Speech;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -150,12 +150,12 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
+				72840905B0B2A87E471815EB /* Speech */,
 				8B96FCAD2F9ADF8400A7D0D9 /* Server */,
 				8B96FCB32F9ADFB100A7D0D9 /* App */,
 				8BBE40962F96ACE800F9DB8F /* bigbro */,
 				8BBE41692F96B2FD00F9DB8F /* UI */,
 				CB38E23F1C1426597F293086 /* Inference */,
-				72840905B0B2A87E471815EB /* Speech */,
 			);
 			name = bigbro;
 			packageProductDependencies = (
@@ -669,22 +669,6 @@
 				minimumVersion = 0.31.4;
 			};
 		};
-		E10252A53CFF58CC02758E17 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/ml-explore/mlx-swift-lm";
-			requirement = {
-				kind = exactVersion;
-				version = 3.31.4;
-			};
-		};
-		AC08B76AC61A0E973917550B /* XCRemoteSwiftPackageReference "FluidAudio" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/FluidInference/FluidAudio.git";
-			requirement = {
-				kind = upToNextMinorVersion;
-				minimumVersion = 0.12.4;
-			};
-		};
 		507EAAB8050BA92B0A9A461D /* XCRemoteSwiftPackageReference "swift-huggingface" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/huggingface/swift-huggingface";
@@ -701,28 +685,29 @@
 				minimumVersion = 1.3.0;
 			};
 		};
+		AC08B76AC61A0E973917550B /* XCRemoteSwiftPackageReference "FluidAudio" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/FluidInference/FluidAudio.git";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 0.12.4;
+			};
+		};
+		E10252A53CFF58CC02758E17 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ml-explore/mlx-swift-lm";
+			requirement = {
+				kind = exactVersion;
+				version = 3.31.4;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		E3BA184F2A0B3A04A495B7E9 /* MLX */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 2D2A5820D35E45D8FB4BC1C9 /* XCRemoteSwiftPackageReference "mlx-swift" */;
-			productName = MLX;
-		};
-		5B1A4CE6387B9134F5C88BD8 /* MLXLLM */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = E10252A53CFF58CC02758E17 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
-			productName = MLXLLM;
-		};
 		0A11B8729A5EB859E7E17D6B /* MLXVLM */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = E10252A53CFF58CC02758E17 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
 			productName = MLXVLM;
-		};
-		A4C9785C464B08862D99712E /* MLXLMCommon */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = E10252A53CFF58CC02758E17 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
-			productName = MLXLMCommon;
 		};
 		40D221FC0DA0E0D677678993 /* FluidAudio */ = {
 			isa = XCSwiftPackageProductDependency;
@@ -734,15 +719,30 @@
 			package = E10252A53CFF58CC02758E17 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
 			productName = MLXHuggingFace;
 		};
-		B93AD358770CDCCBD5640F3B /* HuggingFace */ = {
+		5B1A4CE6387B9134F5C88BD8 /* MLXLLM */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 507EAAB8050BA92B0A9A461D /* XCRemoteSwiftPackageReference "swift-huggingface" */;
-			productName = HuggingFace;
+			package = E10252A53CFF58CC02758E17 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
+			productName = MLXLLM;
 		};
 		5C2253DFC27F6E4DBE252C3F /* Tokenizers */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 8A4CB0ABF0D954A2BD109387 /* XCRemoteSwiftPackageReference "swift-transformers" */;
 			productName = Tokenizers;
+		};
+		A4C9785C464B08862D99712E /* MLXLMCommon */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E10252A53CFF58CC02758E17 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
+			productName = MLXLMCommon;
+		};
+		B93AD358770CDCCBD5640F3B /* HuggingFace */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 507EAAB8050BA92B0A9A461D /* XCRemoteSwiftPackageReference "swift-huggingface" */;
+			productName = HuggingFace;
+		};
+		E3BA184F2A0B3A04A495B7E9 /* MLX */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 2D2A5820D35E45D8FB4BC1C9 /* XCRemoteSwiftPackageReference "mlx-swift" */;
+			productName = MLX;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
