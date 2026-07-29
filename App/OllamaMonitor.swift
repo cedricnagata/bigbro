@@ -2,13 +2,19 @@ import Foundation
 import Combine
 
 @MainActor
-final class OllamaMonitor: ObservableObject {
-    static let baseURL = "http://localhost:11434"
-
-    enum Status { case unknown, running, unreachable }
-
-    @Published var status: Status = .unknown
+final class OllamaMonitor: ObservableObject, BackendStatusReporting {
+    @Published var status: BackendStatus = .unknown
     @Published var installedModels: [String] = []
+
+    // MARK: - BackendStatusReporting
+
+    var runningSummary: String {
+        "Running (\(installedModels.count) model\(installedModels.count == 1 ? "" : "s"))"
+    }
+
+    var detailItems: [String] { installedModels }
+
+    var unreachableHint: String { "Not running — start Ollama to use BigBro" }
 
     private var pollTask: Task<Void, Never>?
 
@@ -29,7 +35,11 @@ final class OllamaMonitor: ObservableObject {
 
     func refresh() async {
         do {
-            let url = URL(string: "\(Self.baseURL)/api/tags")!
+            guard let url = AppSettings.shared.tagsURL else {
+                status = .unreachable
+                installedModels = []
+                return
+            }
             let (data, response) = try await URLSession.shared.data(from: url)
             guard (response as? HTTPURLResponse)?.statusCode == 200,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

@@ -72,6 +72,12 @@ actor PeerServer {
         connectionIds[connectionId]
     }
 
+    /// Whether a peer is still attached. Lets long-running sends — streamed audio, above
+    /// all — stop early instead of logging one failure per frame into a dead connection.
+    func isConnected(deviceId: String) -> Bool {
+        peers[deviceId] != nil
+    }
+
     func lastHeardDate(for deviceId: String) -> Date? {
         lastHeard[deviceId]
     }
@@ -82,7 +88,10 @@ actor PeerServer {
             return
         }
         guard let data = try? JSONSerialization.data(withJSONObject: message) else { return }
-        print("[PeerServer] → \(deviceId.prefix(8)): \(message["type"] ?? "?")")
+        // Audio streams at several frames a second; logging every one drowns everything else.
+        if (message["type"] as? String) != "audioChunk" {
+            print("[PeerServer] → \(deviceId.prefix(8)): \(message["type"] ?? "?")")
+        }
         let frame = framed(data)
         await withCheckedContinuation { cont in
             conn.send(content: frame, completion: .contentProcessed { error in
