@@ -12,12 +12,48 @@ Targeting the OpenAI surface rather than any one backend's native API means [Oll
 2. An iOS app using [BigBroKit](https://github.com/nagata-inc/bigbro-kit) discovers your Mac via Bonjour (`_bigbro._tcp.`)
 3. The iOS app sends a pairing request — an approval dialog appears on the Mac
 4. Once approved, the Mac remembers the device permanently; future reconnects are auto-approved silently
-5. Each inference request from iOS is forwarded to your local Ollama instance and streamed back in real time
+5. Each request from iOS is forwarded to your local backend over `/v1/…` and streamed back in real time
 
 ## Requirements
 
 - macOS 14 Sonoma or later
-- [Ollama](https://ollama.ai) running locally
+- [Ollama](https://ollama.ai) running locally for text generation
+- Optional: a speech backend for text-to-speech and transcription (see below)
+
+## Backends
+
+BigBro speaks the OpenAI-compatible API, so any server exposing `/v1/…` works. Capabilities
+differ, which is why chat and speech are configured separately:
+
+| | Ollama (`:11434`) | LocalAI (`:8080`) | Speaches (`:8000`) |
+|---|---|---|---|
+| `/v1/chat/completions` | ✅ | ✅ | — |
+| `tools` / tool calling | ✅ | ✅ | — |
+| `/v1/audio/speech` | ❌ | ✅ | ✅ |
+| `/v1/audio/transcriptions` | ❌ | ✅ | ✅ |
+| Model install from BigBro | ✅ `/api/pull` | ✅ gallery | — |
+
+Ollama has no audio endpoints and no plans to add them — the native-TTS proposal
+([#11021](https://github.com/ollama/ollama/issues/11021)) was closed as a duplicate of
+[#5424](https://github.com/ollama/ollama/issues/5424), open since 2024 — so speech needs a
+second server.
+
+### Speech backend setup
+
+**LocalAI** (default, `http://localhost:8080`) serves both speech and transcription:
+
+```sh
+docker run -p 8080:8080 --name localai localai/localai:latest
+```
+
+A native macOS DMG exists but has [known installer problems on Apple Silicon](https://github.com/mudler/LocalAI/issues/6679);
+Docker or the plain binary avoid them.
+
+**Speaches** (`http://localhost:8000`) is a drop-in alternative — Kokoro or Piper for speech,
+faster-whisper for transcription — and describes itself as "Ollama, but for TTS/STT".
+
+Enable speech in **Settings → Speech**, then use **Preview** to confirm a voice works before
+involving a device.
 
 ## Installation
 
@@ -31,9 +67,17 @@ Click the BigBro icon to see each paired device with a live status indicator and
 
 Open **Settings** (⌘,) for two tabs:
 
-**General** — Ollama configuration:
-- **Ollama status** — live indicator showing whether Ollama is running, with an expandable list of installed models
-- **Default model** — fallback model used when the iOS client doesn't specify one; populated from Ollama's installed models
+**General** — backend configuration, in two sections:
+
+*Text Generation*
+- **Status** — live indicator for the chat backend, with an expandable list of installed models
+- **Default model** — fallback used when the iOS client doesn't specify one
+
+*Speech* — off by default, and while off nothing is polled and no warnings appear
+- **Enable speech** — turns text-to-speech and transcription on
+- **Status** — live indicator for the speech backend, with the voices it reports
+- **Voice** — free-form, since voice names aren't standardised across backends (`af_heart`, `alloy`, `en_US-amy-medium`); the menu lists whatever the backend advertises, and **Preview** plays a sample on the Mac
+- **Speech model** / **Audio format** / **Transcription model**
 
 **Devices** — paired device management:
 - Each connected device shows its required models with install status (✓ installed / ✗ missing)
