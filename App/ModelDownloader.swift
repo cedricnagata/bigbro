@@ -77,7 +77,9 @@ final class ModelDownloader: ObservableObject {
         var perDigest: [String: (completed: Int64, total: Int64)] = [:]
 
         do {
-            let url = URL(string: "\(OllamaMonitor.baseURL)/api/pull")!
+            guard let url = AppSettings.shared.pullURL else {
+                throw NSError(domain: "ModelDownloader", code: -1, userInfo: [NSLocalizedDescriptionKey: "Ollama URL is not configured"])
+            }
             var req = URLRequest(url: url)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")

@@ -3,8 +3,6 @@ import Combine
 
 @MainActor
 final class OllamaMonitor: ObservableObject {
-    static let baseURL = "http://localhost:11434"
-
     enum Status { case unknown, running, unreachable }
 
     @Published var status: Status = .unknown
@@ -29,7 +27,11 @@ final class OllamaMonitor: ObservableObject {
 
     func refresh() async {
         do {
-            let url = URL(string: "\(Self.baseURL)/api/tags")!
+            guard let url = AppSettings.shared.tagsURL else {
+                status = .unreachable
+                installedModels = []
+                return
+            }
             let (data, response) = try await URLSession.shared.data(from: url)
             guard (response as? HTTPURLResponse)?.statusCode == 200,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
