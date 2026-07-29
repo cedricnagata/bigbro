@@ -2,11 +2,19 @@ import Foundation
 import Combine
 
 @MainActor
-final class OllamaMonitor: ObservableObject {
-    enum Status { case unknown, running, unreachable }
-
-    @Published var status: Status = .unknown
+final class OllamaMonitor: ObservableObject, BackendStatusReporting {
+    @Published var status: BackendStatus = .unknown
     @Published var installedModels: [String] = []
+
+    // MARK: - BackendStatusReporting
+
+    var runningSummary: String {
+        "Running (\(installedModels.count) model\(installedModels.count == 1 ? "" : "s"))"
+    }
+
+    var detailItems: [String] { installedModels }
+
+    var unreachableHint: String { "Not running — start Ollama to use BigBro" }
 
     private var pollTask: Task<Void, Never>?
 
