@@ -1,7 +1,12 @@
 import Foundation
 
-/// Bridges `MLXEngine.ensureLoaded` to `ModelInstalling`, so `ModelDownloader` — and its
+/// Bridges `MLXEngine.download` to `ModelInstalling`, so `ModelDownloader` — and its
 /// throttling and peer `modelDownloadProgress` broadcast — needs no changes at all.
+///
+/// Downloads only. Installing a model used to run it too, because the only available call
+/// downloaded and materialized in one step — so pulling a 12 GB model from Settings also
+/// pinned 12 GB of memory nobody asked to spend. Fetching the weights and starting the model
+/// are now separate, and this is the fetch.
 ///
 /// Installs are keyed by catalog id. A name that resolves to nothing is a hard error rather
 /// than a fallback: this path exists to fetch one specific model, and quietly downloading a
@@ -30,7 +35,7 @@ struct MLXInstaller: ModelInstalling {
                 }
 
                 do {
-                    _ = try await MLXEngine.shared.ensureLoaded(entry) { fraction in
+                    _ = try await MLXEngine.shared.download(entry) { fraction in
                         Task { @MainActor in
                             current.status = "downloading \(entry.displayName)"
                             current.bytesCompleted = Int64((fraction * Double(Self.percentScale)).rounded())

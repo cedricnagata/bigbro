@@ -154,9 +154,14 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         case "transcribeRequest":
             print("[AppRouter] transcribeRequest from \(deviceId.prefix(8))")
             await handleTranscribeRequest(message, server: server, deviceId: deviceId)
-        case "preload":
-            print("[AppRouter] preload from \(deviceId.prefix(8))")
-            await handlePreloadRequest(message, server: server, deviceId: deviceId)
+        // `preload` is the old name for `run`, kept so clients built before the rename keep
+        // working — the two do exactly the same thing.
+        case "run", "preload":
+            print("[AppRouter] run from \(deviceId.prefix(8))")
+            await handleRunRequest(message, server: server, deviceId: deviceId)
+        case "stop":
+            print("[AppRouter] stop from \(deviceId.prefix(8))")
+            await handleStopRequest(message, server: server, deviceId: deviceId)
         case "bye":
             print("[AppRouter] bye from \(deviceId.prefix(8)), marking disconnected")
             await MainActor.run { pairingManager.markDisconnected(deviceId) }
@@ -417,20 +422,36 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         await drain(stream, requestId: requestId, deviceId: deviceId, server: server, label: "Generate", sendReasoning: sendReasoning)
     }
 
-    /// Loads a model into memory without generating anything, so a client can pay the
-    /// multi-second "materialize weights into MLX arrays" cost ahead of the user's first
-    /// message — e.g. when a chat screen opens — rather than that cost landing on the first
-    /// real request. Purely an optimization: nothing else in the app requires this message,
-    /// and skipping it is harmless since `chatStream` calls `ensureLoaded` lazily either way.
-    private func handlePreloadRequest(_ message: [String: Any], server: PeerServer, deviceId: String) async {
+    /// Resolves the `model` field of a `run`/`stop` message.
+    ///
+    /// `text` and `vision` are capability words, not model names — they mean "whichever model
+    /// is configured for this". Anything else is a catalog id, so a client can start the
+    /// specific model it is about to ask for.
+    private func requestedModel(_ requested: String) async -> BigBroModel {
+        await MainActor.run {
+            switch requested {
+            case "text":   return mlxEngine.defaultTextModel
+            case "vision": return mlxEngine.defaultVisionModel
+            default:       return ModelCatalog.resolve(requested) ?? mlxEngine.defaultTextModel
+            }
+        }
+    }
+
+    /// Starts a model — materializes its weights into memory — without generating anything,
+    /// so a client can pay that multi-second cost ahead of the user's first message rather
+    /// than have it land on the first real request.
+    ///
+    /// Purely an optimization: skipping it is harmless, since a request starts the model it
+    /// needs anyway.
+    private func handleRunRequest(_ message: [String: Any], server: PeerServer, deviceId: String) async {
         guard let requestId = message["requestId"] as? String else {
-            print("[AppRouter] handlePreloadRequest: missing requestId")
+            print("[AppRouter] handleRunRequest: missing requestId")
             return
         }
         let requested = (message["model"] as? String)?.lowercased() ?? "text"
 
-        // Speech is warmed through its own engine. The Mac already loads Kokoro and Parakeet
-        // at launch when speech is enabled, so this is usually a no-op — but a client that
+        // Speech runs through its own engine. The Mac already loads Kokoro and Parakeet at
+        // launch when speech is enabled, so this is usually a no-op — but a client that
         // connects while that is still in flight needs somewhere to *wait*, which matters for
         // a voice loop: without it the first utterance eats the whole cold load.
         if let speechKinds = Self.speechKinds(for: requested) {
@@ -438,28 +459,48 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
             return
         }
 
-        // "text" and "vision" are capability words, not model names — they mean "whichever
-        // model is configured for this". Anything else is looked up in the catalog, so a
-        // client can warm the specific model it is about to ask for.
-        let model: BigBroModel = await MainActor.run {
-            switch requested {
-            case "text":   return mlxEngine.defaultTextModel
-            case "vision": return mlxEngine.defaultVisionModel
-            default:       return ModelCatalog.resolve(requested) ?? mlxEngine.defaultTextModel
-            }
-        }
+        let model = await requestedModel(requested)
 
-        print("[AppRouter] preload requested by \(deviceId.prefix(8)) for \(model.displayName)")
+        print("[AppRouter] run requested by \(deviceId.prefix(8)) for \(model.displayName)")
         guard await ensureModelReady(model, requestId: requestId, deviceId: deviceId, server: server) else { return }
 
         do {
-            try await mlxEngine.ensureLoaded(model)
-            print("[AppRouter] preload complete for \(deviceId.prefix(8)): \(model.displayName)")
+            try await mlxEngine.run(model)
+            print("[AppRouter] run complete for \(deviceId.prefix(8)): \(model.displayName)")
             await server.send(["type": "done", "requestId": requestId], to: deviceId)
         } catch {
-            print("[AppRouter] preload error for \(deviceId.prefix(8)): \(error)")
+            print("[AppRouter] run error for \(deviceId.prefix(8)): \(error)")
             await server.send(["type": "error", "requestId": requestId, "message": error.localizedDescription], to: deviceId)
         }
+    }
+
+    /// Unloads a model from memory, keeping its download.
+    ///
+    /// The counterpart to `run`, for a client that is finished with a model and wants the
+    /// Mac's memory back. Deliberately not a delete: the weights stay on disk, so starting it
+    /// again skips the download entirely.
+    ///
+    /// Succeeds whether or not the model was running — "stop what isn't started" is the state
+    /// the caller wanted, not an error. Removing a download is not exposed over the wire at
+    /// all; that is destructive and belongs to whoever owns the Mac, in Settings.
+    private func handleStopRequest(_ message: [String: Any], server: PeerServer, deviceId: String) async {
+        guard let requestId = message["requestId"] as? String else {
+            print("[AppRouter] handleStopRequest: missing requestId")
+            return
+        }
+        let requested = (message["model"] as? String)?.lowercased() ?? "text"
+
+        if Self.speechKinds(for: requested) != nil {
+            // Speech models are shared by every paired device and reload slowly; letting one
+            // client evict them for everyone is not a trade worth offering.
+            await fail(requestId, "Speech models cannot be stopped remotely.", deviceId: deviceId, server: server)
+            return
+        }
+
+        let model = await requestedModel(requested)
+        await MainActor.run { mlxEngine.stop(model.id) }
+        print("[AppRouter] stopped \(model.displayName) for \(deviceId.prefix(8))")
+        await server.send(["type": "done", "requestId": requestId], to: deviceId)
     }
 
     /// Speech kinds named by a `preload` request, or nil if this isn't a speech preload.

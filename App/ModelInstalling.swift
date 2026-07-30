@@ -16,7 +16,7 @@ struct ModelInstallProgress: Equatable {
 /// Installs a model, reporting progress as it goes.
 ///
 /// The one conformer is `MLXInstaller` (Inference/MLXInstaller.swift), which drives
-/// `MLXEngine.ensureLoaded` — download is a side effect of loading a model container, not a
+/// `MLXEngine.download` — fetching weights to disk, separate from starting the model, not a
 /// separate step, so there is no network code left in this file at all.
 protocol ModelInstalling {
     /// Streams progress until the install completes or fails. The final element always has

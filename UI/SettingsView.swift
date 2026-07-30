@@ -125,50 +125,143 @@ private struct ModelRow: View {
     @EnvironmentObject var modelDownloader: ModelDownloader
     let model: BigBroModel
 
+    @State private var confirmingRemove = false
+    @State private var actionError: String?
+
     var body: some View {
-        let loaded = mlxEngine.isLoaded(model.id)
-        let downloaded = mlxEngine.isDownloaded(model.id)
+        let state = mlxEngine.state(model.id)
         let progress = modelDownloader.progress[model.id]
 
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
-                Image(systemName: loaded ? "checkmark.circle.fill" : (progress != nil ? "arrow.down.circle" : (downloaded ? "checkmark.circle" : "arrow.down.circle.dotted")))
-                    .foregroundStyle(loaded ? .green : (progress != nil ? .blue : (downloaded ? .green : .secondary)))
+                Image(systemName: icon(for: state))
+                    .foregroundStyle(tint(for: state))
                 Text(model.displayName)
                 Text(String(format: "%.1f GB", model.approximateGB))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                 Spacer(minLength: 8)
-                if !downloaded && progress == nil {
-                    Button("Download") {
-                        modelDownloader.startDownload(model.id)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
+                actions(for: state)
             }
 
             CapabilityBadges(model: model)
 
-            if let progress {
-                if let err = progress.error {
-                    Text("Error: \(err)")
-                        .font(.caption2)
-                        .foregroundStyle(.red)
-                } else {
-                    ProgressView(value: progress.percent)
-                        .progressViewStyle(.linear)
-                        .controlSize(.mini)
-                    Text("\(progress.status) — \(Int((progress.percent * 100).rounded()))%")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            } else if downloaded && !loaded {
-                Text("Downloaded — loads on first use")
+            if let progress, progress.error == nil, !progress.done {
+                ProgressView(value: progress.percent)
+                    .progressViewStyle(.linear)
+                    .controlSize(.mini)
+                Text("\(progress.status) — \(Int((progress.percent * 100).rounded()))%")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+            } else {
+                Text(statusLine(for: state))
+                    .font(.caption2)
+                    .foregroundStyle(state.isFailed ? .red : .secondary)
+            }
+
+            if let actionError {
+                Text(actionError)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
             }
         }
+        .confirmationDialog(
+            "Remove \(model.displayName)?",
+            isPresented: $confirmingRemove,
+            titleVisibility: .visible
+        ) {
+            Button("Remove Download", role: .destructive) { remove() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Deletes about \(String(format: "%.1f", model.approximateGB)) GB from disk. Using this model again re-downloads it.")
+        }
+    }
+
+    /// Four operations, but never all at once — which apply depends entirely on where the
+    /// model is, and offering "Stop" for something that isn't running is just noise.
+    @ViewBuilder
+    private func actions(for state: MLXEngine.ModelRunState) -> some View {
+        switch state {
+        case .notDownloaded:
+            Button("Download") { modelDownloader.startDownload(model.id) }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+        case .downloading, .starting:
+            ProgressView().controlSize(.small)
+
+        case .downloaded, .failed:
+            HStack(spacing: 6) {
+                Button("Run") { run() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                Button("Remove") { confirmingRemove = true }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+
+        case .running:
+            HStack(spacing: 6) {
+                Button("Stop") { mlxEngine.stop(model.id) }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                Button("Remove") { confirmingRemove = true }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+        }
+    }
+
+    private func run() {
+        actionError = nil
+        Task {
+            do { try await mlxEngine.run(model) }
+            catch { actionError = error.localizedDescription }
+        }
+    }
+
+    private func remove() {
+        actionError = nil
+        do { try mlxEngine.remove(model) }
+        catch { actionError = "Could not remove: \(error.localizedDescription)" }
+    }
+
+    private func statusLine(for state: MLXEngine.ModelRunState) -> String {
+        switch state {
+        case .notDownloaded:       return "Not downloaded"
+        case .downloading:         return "Downloading…"
+        case .downloaded:          return "Downloaded — not using memory. Starts on first use."
+        case .starting:            return "Starting — loading weights into memory"
+        case .running:             return "Running — in memory, answers immediately"
+        case .failed(let message): return "Error: \(message)"
+        }
+    }
+
+    private func icon(for state: MLXEngine.ModelRunState) -> String {
+        switch state {
+        case .notDownloaded:            return "arrow.down.circle.dotted"
+        case .downloading, .starting:   return "arrow.down.circle"
+        case .downloaded:               return "internaldrive"
+        case .running:                  return "bolt.circle.fill"
+        case .failed:                   return "exclamationmark.circle.fill"
+        }
+    }
+
+    private func tint(for state: MLXEngine.ModelRunState) -> Color {
+        switch state {
+        case .notDownloaded:            return .secondary
+        case .downloading, .starting:   return .blue
+        case .downloaded:               return .secondary
+        case .running:                  return .green
+        case .failed:                   return .red
+        }
+    }
+}
+
+extension MLXEngine.ModelRunState {
+    var isFailed: Bool {
+        if case .failed = self { return true }
+        return false
     }
 }
 
