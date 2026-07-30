@@ -364,8 +364,18 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
             print("[AppRouter] handlePreloadRequest: missing requestId")
             return
         }
-        let wantsVision = (message["model"] as? String)?.lowercased() == "vision"
-        let kind: MLXEngine.ModelKind = wantsVision ? .vision : .text
+        let requested = (message["model"] as? String)?.lowercased() ?? "text"
+
+        // Speech is warmed through its own engine. The Mac already loads Kokoro and Parakeet
+        // at launch when speech is enabled, so this is usually a no-op — but a client that
+        // connects while that is still in flight needs somewhere to *wait*, which matters for
+        // a voice loop: without it the first utterance eats the whole cold load.
+        if let speechKinds = Self.speechKinds(for: requested) {
+            await preloadSpeech(speechKinds, requestId: requestId, deviceId: deviceId, server: server)
+            return
+        }
+
+        let kind: MLXEngine.ModelKind = requested == "vision" ? .vision : .text
 
         print("[AppRouter] preload requested by \(deviceId.prefix(8)) for \(kind.displayName)")
         guard await ensureModelReady(kind, requestId: requestId, deviceId: deviceId, server: server) else { return }
@@ -376,6 +386,39 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
             await server.send(["type": "done", "requestId": requestId], to: deviceId)
         } catch {
             print("[AppRouter] preload error for \(deviceId.prefix(8)): \(error)")
+            await server.send(["type": "error", "requestId": requestId, "message": error.localizedDescription], to: deviceId)
+        }
+    }
+
+    /// Speech kinds named by a `preload` request, or nil if this isn't a speech preload.
+    private static func speechKinds(for requested: String) -> [SpeechEngine.ModelKind]? {
+        switch requested {
+        case "tts":    return [.tts]
+        case "stt":    return [.stt]
+        case "speech": return SpeechEngine.ModelKind.allCases
+        default:       return nil
+        }
+    }
+
+    private func preloadSpeech(
+        _ kinds: [SpeechEngine.ModelKind],
+        requestId: String,
+        deviceId: String,
+        server: PeerServer
+    ) async {
+        guard await speechReady(requestId: requestId, deviceId: deviceId, server: server) else { return }
+
+        print("[AppRouter] speech preload requested by \(deviceId.prefix(8)) for \(kinds.map(\.displayName).joined(separator: ", "))")
+        do {
+            // Sequential, not concurrent: both are CoreML/Neural-Engine loads, so racing them
+            // contends for the same compiler and finishes no sooner.
+            for kind in kinds {
+                try await speechEngine.ensureLoaded(kind)
+            }
+            print("[AppRouter] speech preload complete for \(deviceId.prefix(8))")
+            await server.send(["type": "done", "requestId": requestId], to: deviceId)
+        } catch {
+            print("[AppRouter] speech preload error for \(deviceId.prefix(8)): \(error)")
             await server.send(["type": "error", "requestId": requestId, "message": error.localizedDescription], to: deviceId)
         }
     }

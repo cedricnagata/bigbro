@@ -106,7 +106,7 @@ existing BigBroKit clients work against this branch without a rebuild.
 | `generateRequest` | `requestId`, `prompt`, `streaming`, `images?`, `system?`, `model?`, `options?`, `think?`, `reasoning_effort?` | Single-turn generate |
 | `speechRequest` | `requestId`, `input`, `voice?`, `speed?` | Text-to-speech |
 | `transcribeRequest` | `requestId`, `audio` (base64), `audioFormat?` | Speech-to-text. Max 10 MB decoded |
-| `preload` | `requestId`, `model?` (`"text"` / `"vision"`, default `"text"`) | Loads a model into memory without generating anything — see below |
+| `preload` | `requestId`, `model?` (`"text"` / `"vision"` / `"tts"` / `"stt"` / `"speech"`, default `"text"`) | Loads a model into memory without generating anything — see below |
 | `bye` | — | Clean disconnect |
 
 Routing is decided by request content (images present → vision model), not by the `model` field.
@@ -153,6 +153,20 @@ earlier instead:
 BigBroKit exposes this as `BigBroClient.preloadModel(vision:)`. It's a pure optimization —
 skipping it is harmless, since `request`/`generateRequest` load the model themselves anyway if
 it isn't already resident.
+
+`"tts"`, `"stt"` and `"speech"` (both) warm Kokoro and Parakeet instead, via
+`BigBroClient.preloadSpeech()`. BigBro already loads these at launch whenever speech is
+enabled, so this is usually instant — its real job is giving a client somewhere to *wait*.
+That matters for a hands-free voice loop, where a cold model load would otherwise swallow the
+first thing the user says. Errors if speech is switched off in Settings.
+
+### Spoken conversation
+
+There is no server-side voice mode: an end-to-end spoken turn is `transcribeRequest` →
+`request` → `speechRequest`, driven from the client. That is deliberate — the tool-calling
+loop runs on the device, so only the client knows which model turn is a final answer worth
+speaking and which is an intermediate tool step. BigBroKit packages the sequence as
+`BigBroClient.converse(audio:)` and the continuous version as `BigBroVoiceSession`.
 
 ### Mac → iOS messages
 
