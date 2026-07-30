@@ -99,10 +99,11 @@ final class PairingManager: ObservableObject {
         }
     }
 
-    /// A client's `requiredModels` are legacy Ollama-style tags (`gpt-oss:20b`,
-    /// `qwen3-vl:30b`); BigBro no longer has models by those names, so each is mapped onto
-    /// whichever of the two fixed local models it most plausibly refers to (see
-    /// `MLXEngine.isRequiredModelSatisfied`) rather than matched by exact string.
+    /// A client's `requiredModels` are catalog ids, but older ones send Ollama-style tags
+    /// (`gpt-oss:20b`), so each is resolved through `ModelCatalog` rather than matched
+    /// exactly. A name matching nothing in the catalog is not reported missing — there is no
+    /// model to pull for it, so offering one would be a dead end (see
+    /// `MLXEngine.isRequiredModelSatisfied`).
     private func missingModels(requiredModels: [String]) -> [String] {
         requiredModels.filter { !MLXEngine.shared.isRequiredModelSatisfied($0) }
     }
@@ -118,12 +119,12 @@ final class PairingManager: ObservableObject {
         alert.alertStyle = .informational
         NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn {
-            // Start by canonical model name, not the client's declared string — that's the
-            // same key `AppRouter` and `ModelDownloader.progress` use, so this can't kick off
-            // a second, differently-keyed download for the model AppRouter is already pulling.
-            let kinds = Set(missing.map { MLXEngine.ModelKind.matching(declaredName: $0) })
-            for kind in kinds {
-                modelDownloader?.startDownload(kind.displayName)
+            // Start by catalog id, not the client's declared string — that's the same key
+            // `AppRouter` and `ModelDownloader.progress` use, so this can't kick off a second,
+            // differently-keyed download for the model AppRouter is already pulling.
+            let ids = Set(missing.compactMap { ModelCatalog.resolve($0)?.id })
+            for id in ids {
+                modelDownloader?.startDownload(id)
             }
         }
     }

@@ -183,34 +183,73 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
 
     // MARK: - Missing-model handling
 
-    /// Returns true once `kind` is ready to use. If it isn't, kicks off (or reports) a
+    /// Returns true once `model` is ready to use. If it isn't, kicks off (or reports) a
     /// download and tells the peer, mirroring the old Ollama-missing-model flow so BigBroKit
-    /// clients need no changes. Callers that already know which model they need (a `preload`)
-    /// pass it directly; chat/generate derive it from message content via `mlxEngine.kind(for:)`.
+    /// clients need no changes.
+    ///
+    /// Downloads are keyed by catalog id, not display name — that is what the client sent,
+    /// what `MLXInstaller` resolves, and what progress is reported against, so all three stay
+    /// addressable by the same string.
     private func ensureModelReady(
-        _ kind: MLXEngine.ModelKind,
+        _ model: BigBroModel,
         requestId: String,
         deviceId: String,
         server: PeerServer
     ) async -> Bool {
-        if mlxEngine.isDownloaded(kind) { return true }
+        if mlxEngine.isDownloaded(model.id) { return true }
 
-        let modelName = kind.displayName
-        let alreadyInProgress = modelDownloader.isDownloading(modelName)
+        let alreadyInProgress = modelDownloader.isDownloading(model.id)
         if !alreadyInProgress {
-            print("[AppRouter] Model '\(modelName)' missing — starting download for \(deviceId.prefix(8))")
-            modelDownloader.startDownload(modelName)
+            print("[AppRouter] Model '\(model.id)' missing — starting download for \(deviceId.prefix(8))")
+            modelDownloader.startDownload(model.id)
         } else {
-            print("[AppRouter] Model '\(modelName)' already downloading — informing \(deviceId.prefix(8))")
+            print("[AppRouter] Model '\(model.id)' already downloading — informing \(deviceId.prefix(8))")
         }
         await server.send([
             "type": "modelDownloading",
             "requestId": requestId,
-            "model": modelName,
+            "model": model.id,
             "alreadyInProgress": alreadyInProgress,
         ], to: deviceId)
         await server.send(["type": "done", "requestId": requestId], to: deviceId)
         return false
+    }
+
+    /// Tells the peer what the chosen model could not do, before any of the answer arrives.
+    ///
+    /// Without this the client cannot tell the difference between "the model considered your
+    /// tools and chose not to call one" and "this model has no tool support and they were
+    /// discarded" — the transcript looks identical. A client that predates the message
+    /// ignores it, same as every other additive type.
+    private func reportCapabilityGaps(
+        _ resolved: ResolvedRequest,
+        requestId: String,
+        deviceId: String,
+        server: PeerServer
+    ) async {
+        var notes: [String] = []
+        if resolved.droppedTools {
+            notes.append("\(resolved.model.displayName) does not support tool calling — tools were ignored.")
+        }
+        if resolved.droppedReasoningEffort {
+            notes.append("\(resolved.model.displayName) has no reasoning effort control — the setting was ignored.")
+        }
+        if resolved.substitutedForImages {
+            notes.append("Switched to \(resolved.model.displayName) because the request included images.")
+        }
+        guard !notes.isEmpty else { return }
+
+        print("[AppRouter] \(requestId.prefix(8)) capability notes: \(notes.joined(separator: " "))")
+        await server.send([
+            "type": "modelCapabilities",
+            "requestId": requestId,
+            "model": resolved.model.id,
+            "supportsTools": resolved.model.supportsTools,
+            "supportsImages": resolved.model.supportsImages,
+            "supportsReasoning": resolved.model.reasoning.producesTrace,
+            "supportsReasoningEffort": resolved.model.reasoning.acceptsEffort,
+            "notes": notes,
+        ], to: deviceId)
     }
 
     // MARK: - Event forwarding
@@ -316,12 +355,25 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         // the fact.
         let reasoningEffort = resolveReasoningEffort(message, sendReasoning: sendReasoning)
 
-        print("[AppRouter] handleRequest: requestId=\(requestId.prefix(8)) tools=\(tools.count) messages=\(messagesRaw.count) think=\(sendReasoning) effort=\(reasoningEffort ?? "default")")
+        let resolved = await MainActor.run {
+            mlxEngine.resolve(requestedModel: message["model"] as? String, messages: messagesRaw,
+                              toolCount: tools.count, reasoningEffort: reasoningEffort)
+        }
+        print("[AppRouter] handleRequest: requestId=\(requestId.prefix(8)) model=\(resolved.model.id) tools=\(tools.count) messages=\(messagesRaw.count) think=\(sendReasoning) effort=\(reasoningEffort ?? "default")")
 
-        let kind = mlxEngine.kind(for: messagesRaw)
-        guard await ensureModelReady(kind, requestId: requestId, deviceId: deviceId, server: server) else { return }
+        guard await ensureModelReady(resolved.model, requestId: requestId, deviceId: deviceId, server: server) else { return }
+        await reportCapabilityGaps(resolved, requestId: requestId, deviceId: deviceId, server: server)
 
-        let stream = mlxEngine.chatStream(messages: messagesRaw, tools: tools, options: options, reasoningEffort: reasoningEffort)
+        // A model with no reasoning phase produces no trace to forward, so `think` becomes
+        // moot rather than wrong — nothing is filtered because nothing is generated.
+        let stream = mlxEngine.chatStream(
+            model: resolved.model,
+            messages: messagesRaw,
+            tools: tools,
+            options: options,
+            reasoningEffort: reasoningEffort,
+            wantsThinking: sendReasoning
+        )
         await drain(stream, requestId: requestId, deviceId: deviceId, server: server, label: "Request", sendReasoning: sendReasoning)
     }
 
@@ -347,10 +399,21 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         if !images.isEmpty { user["images"] = images }
         messagesRaw.append(user)
 
-        let kind = mlxEngine.kind(for: messagesRaw)
-        guard await ensureModelReady(kind, requestId: requestId, deviceId: deviceId, server: server) else { return }
+        let resolved = await MainActor.run {
+            mlxEngine.resolve(requestedModel: message["model"] as? String, messages: messagesRaw,
+                              reasoningEffort: reasoningEffort)
+        }
+        guard await ensureModelReady(resolved.model, requestId: requestId, deviceId: deviceId, server: server) else { return }
+        await reportCapabilityGaps(resolved, requestId: requestId, deviceId: deviceId, server: server)
 
-        let stream = mlxEngine.chatStream(messages: messagesRaw, tools: [], options: options, reasoningEffort: reasoningEffort)
+        let stream = mlxEngine.chatStream(
+            model: resolved.model,
+            messages: messagesRaw,
+            tools: [],
+            options: options,
+            reasoningEffort: reasoningEffort,
+            wantsThinking: sendReasoning
+        )
         await drain(stream, requestId: requestId, deviceId: deviceId, server: server, label: "Generate", sendReasoning: sendReasoning)
     }
 
@@ -375,14 +438,23 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
             return
         }
 
-        let kind: MLXEngine.ModelKind = requested == "vision" ? .vision : .text
+        // "text" and "vision" are capability words, not model names — they mean "whichever
+        // model is configured for this". Anything else is looked up in the catalog, so a
+        // client can warm the specific model it is about to ask for.
+        let model: BigBroModel = await MainActor.run {
+            switch requested {
+            case "text":   return mlxEngine.defaultTextModel
+            case "vision": return mlxEngine.defaultVisionModel
+            default:       return ModelCatalog.resolve(requested) ?? mlxEngine.defaultTextModel
+            }
+        }
 
-        print("[AppRouter] preload requested by \(deviceId.prefix(8)) for \(kind.displayName)")
-        guard await ensureModelReady(kind, requestId: requestId, deviceId: deviceId, server: server) else { return }
+        print("[AppRouter] preload requested by \(deviceId.prefix(8)) for \(model.displayName)")
+        guard await ensureModelReady(model, requestId: requestId, deviceId: deviceId, server: server) else { return }
 
         do {
-            try await mlxEngine.ensureLoaded(kind)
-            print("[AppRouter] preload complete for \(deviceId.prefix(8)): \(kind.displayName)")
+            try await mlxEngine.ensureLoaded(model)
+            print("[AppRouter] preload complete for \(deviceId.prefix(8)): \(model.displayName)")
             await server.send(["type": "done", "requestId": requestId], to: deviceId)
         } catch {
             print("[AppRouter] preload error for \(deviceId.prefix(8)): \(error)")
