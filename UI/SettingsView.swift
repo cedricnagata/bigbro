@@ -27,13 +27,15 @@ struct SettingsView: View {
 private struct GeneralSettingsTab: View {
     @ObservedObject private var settings = AppSettings.shared
     @EnvironmentObject private var mlxEngine: MLXEngine
-    @StateObject private var preview = SpeechPreview()
+    @EnvironmentObject private var speechEngine: SpeechEngine
 
     // Persisted rather than @State: which sections you care about is a stable preference, and
-    // re-collapsing eleven language models on every launch would be its own annoyance. Both
+    // re-collapsing eleven language models on every launch would be its own annoyance. All
     // open by default — nothing is hidden until the user decides to hide it.
     @AppStorage("bigbro.settings.languageExpanded") private var languageExpanded = true
     @AppStorage("bigbro.settings.visionExpanded") private var visionExpanded = true
+    @AppStorage("bigbro.settings.ttsExpanded") private var ttsExpanded = true
+    @AppStorage("bigbro.settings.sttExpanded") private var sttExpanded = true
 
     var body: some View {
         Form {
@@ -82,48 +84,30 @@ private struct GeneralSettingsTab: View {
                 SectionHeader(title: "Vision models", subtitle: summary(for: ModelCatalog.vision))
             }
 
-            Section {
-                Toggle("Enable speech", isOn: $settings.speechEnabled)
+            Section(isExpanded: $ttsExpanded) {
+                VoiceModelRow(kind: .tts)
 
-                if settings.speechEnabled {
-                    ForEach(SpeechEngine.ModelKind.allCases, id: \.self) { kind in
-                        SpeechModelRow(kind: kind)
-                    }
-
-                    LabeledContent("Voice") {
-                        HStack(spacing: 6) {
-                            // Free-form rather than a closed list: FluidAudio does not
-                            // expose an enumerable voice list the way it does for models.
-                            TextField("", text: $settings.ttsVoice)
-                                .labelsHidden()
-                                .frame(maxWidth: .infinity)
-
-                            Button(preview.isSynthesizing ? "…" : "Preview") {
-                                preview.play(voice: settings.ttsVoice)
-                            }
-                            .disabled(preview.isSynthesizing || settings.ttsVoice.isEmpty)
-                        }
-                    }
-
-                    Text("Which Kokoro speaker to use, e.g. `af_heart`, `am_adam`, `bf_emma`.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    if let error = preview.error {
-                        Text(error)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                    }
-                }
-            } header: {
-                Text("Speech")
-            } footer: {
                 Label(
-                    "Text-to-speech (Kokoro) and transcription (Parakeet), both on-device via FluidAudio.",
+                    "Kokoro, on-device via FluidAudio. Voice (e.g. `af_heart`, `am_adam`, `bf_emma`) is chosen per request by the connecting app, not configured here.",
                     systemImage: "info.circle"
                 )
                 .foregroundStyle(.secondary)
                 .font(.caption)
+            } header: {
+                SectionHeader(title: "TTS models", subtitle: summary(for: .tts))
+            }
+
+            Section(isExpanded: $sttExpanded) {
+                VoiceModelRow(kind: .stt)
+
+                Label(
+                    "Parakeet, on-device via FluidAudio.",
+                    systemImage: "info.circle"
+                )
+                .foregroundStyle(.secondary)
+                .font(.caption)
+            } header: {
+                SectionHeader(title: "STT models", subtitle: summary(for: .stt))
             }
         }
         .formStyle(.grouped)
@@ -137,6 +121,14 @@ private struct GeneralSettingsTab: View {
         if downloaded == 0 { return "none downloaded" }
         if running == 0 { return "\(downloaded) downloaded" }
         return "\(downloaded) downloaded, \(running) running"
+    }
+
+    private func summary(for kind: SpeechEngine.ModelKind) -> String {
+        switch speechEngine.state(kind) {
+        case .notDownloaded, .downloading: return "not downloaded"
+        case .downloaded, .starting, .failed: return "downloaded"
+        case .running: return "downloaded, running"
+        }
     }
 }
 
@@ -348,48 +340,153 @@ private struct CapabilityBadges: View {
     }
 }
 
-/// One row per speech model (Kokoro, Parakeet): its download/load state, and a button to
-/// fetch it. Mirrors `ModelRow`, but tracks state on `SpeechEngine` directly rather than
-/// through `ModelDownloader` — speech models aren't part of the wire protocol's
-/// required-model handshake, so there's no peer-facing download to coordinate.
-private struct SpeechModelRow: View {
+/// One row per speech model kind (Kokoro, Parakeet): its lifecycle state, and buttons to
+/// download / run / stop / remove it. Mirrors `ModelRow`, but tracks state on `SpeechEngine`
+/// directly rather than through `ModelDownloader` — speech models aren't part of the wire
+/// protocol's required-model handshake, so there's no peer-facing download to coordinate.
+private struct VoiceModelRow: View {
     @EnvironmentObject var speechEngine: SpeechEngine
     let kind: SpeechEngine.ModelKind
 
-    var body: some View {
-        let loaded = speechEngine.isLoaded(kind)
-        let downloaded = speechEngine.isDownloaded(kind)
-        let progress = speechEngine.loadProgress[kind]
-        let error = speechEngine.loadErrors[kind]
-        let downloading = !loaded && error == nil && progress != nil
+    @State private var confirmingRemove = false
+    @State private var actionError: String?
 
-        VStack(alignment: .leading, spacing: 2) {
+    var body: some View {
+        let state = speechEngine.state(kind)
+
+        VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
-                Image(systemName: loaded ? "checkmark.circle.fill" : (downloading ? "arrow.down.circle" : (downloaded ? "checkmark.circle" : "xmark.circle.fill")))
-                    .foregroundStyle(loaded ? .green : (downloading ? .blue : (downloaded ? .green : .red)))
+                Image(systemName: icon(for: state))
+                    .foregroundStyle(tint(for: state))
                 Text(kind.displayName)
                 Spacer(minLength: 8)
-                if !loaded && !downloading {
-                    Button("Download") {
-                        Task { try? await speechEngine.ensureLoaded(kind) }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
+                actions(for: state)
             }
-            if let error {
-                Text("Error: \(error)")
-                    .font(.caption2)
-                    .foregroundStyle(.red)
-            } else if downloading, let progress {
+
+            if case .downloading(let progress) = state {
                 ProgressView(value: progress)
                     .progressViewStyle(.linear)
                     .controlSize(.mini)
-                Text("\(Int((progress * 100).rounded()))%")
+                Text("Downloading — \(Int((progress * 100).rounded()))%")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+            } else {
+                Text(statusLine(for: state))
+                    .font(.caption2)
+                    .foregroundStyle(state.isFailed ? .red : .secondary)
+            }
+
+            if let actionError {
+                Text(actionError)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
             }
         }
+        .confirmationDialog(
+            "Remove \(kind.displayName)?",
+            isPresented: $confirmingRemove,
+            titleVisibility: .visible
+        ) {
+            Button("Remove Download", role: .destructive) { remove() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Using \(kind.displayName) again re-downloads it.")
+        }
+    }
+
+    /// Four operations, but never all at once — which apply depends entirely on where the
+    /// model is, and offering "Stop" for something that isn't running is just noise.
+    @ViewBuilder
+    private func actions(for state: SpeechEngine.ModelRunState) -> some View {
+        switch state {
+        case .notDownloaded:
+            Button("Download") { download() }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+        case .downloading, .starting:
+            ProgressView().controlSize(.small)
+
+        case .downloaded, .failed:
+            HStack(spacing: 6) {
+                Button("Run") { run() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                Button("Remove") { confirmingRemove = true }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+
+        case .running:
+            HStack(spacing: 6) {
+                Button("Stop") { speechEngine.stop(kind) }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                Button("Remove") { confirmingRemove = true }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+        }
+    }
+
+    private func download() {
+        actionError = nil
+        Task {
+            do { try await speechEngine.download(kind) }
+            catch { actionError = error.localizedDescription }
+        }
+    }
+
+    private func run() {
+        actionError = nil
+        Task {
+            do { try await speechEngine.run(kind) }
+            catch { actionError = error.localizedDescription }
+        }
+    }
+
+    private func remove() {
+        actionError = nil
+        do { try speechEngine.remove(kind) }
+        catch { actionError = "Could not remove: \(error.localizedDescription)" }
+    }
+
+    private func statusLine(for state: SpeechEngine.ModelRunState) -> String {
+        switch state {
+        case .notDownloaded:       return "Not downloaded"
+        case .downloading:         return "Downloading…"
+        case .downloaded:          return "Downloaded — not using memory. Starts on first use."
+        case .starting:            return "Starting — loading weights into memory"
+        case .running:             return "Running — in memory, answers immediately"
+        case .failed(let message): return "Error: \(message)"
+        }
+    }
+
+    private func icon(for state: SpeechEngine.ModelRunState) -> String {
+        switch state {
+        case .notDownloaded:            return "circle.dotted"
+        case .downloading, .starting:   return "arrow.down.circle"
+        case .downloaded:               return "internaldrive"
+        case .running:                  return "bolt.circle.fill"
+        case .failed:                   return "exclamationmark.circle.fill"
+        }
+    }
+
+    private func tint(for state: SpeechEngine.ModelRunState) -> Color {
+        switch state {
+        case .notDownloaded:            return .secondary
+        case .downloading, .starting:   return .blue
+        case .downloaded:               return .secondary
+        case .running:                  return .green
+        case .failed:                   return .red
+        }
+    }
+}
+
+extension SpeechEngine.ModelRunState {
+    var isFailed: Bool {
+        if case .failed = self { return true }
+        return false
     }
 }
 

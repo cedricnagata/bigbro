@@ -13,7 +13,6 @@ import Tokenizers
 
 enum InferenceError: Error, LocalizedError {
     case invalidImage(messageIndex: Int)
-    case modelNotSelected(capability: String)
     case generationFailed(String)
     case unknownModel(String)
 
@@ -21,8 +20,6 @@ enum InferenceError: Error, LocalizedError {
         switch self {
         case .invalidImage(let index):
             return "Message \(index) included an image that could not be decoded."
-        case .modelNotSelected(let capability):
-            return "No \(capability) model is selected. Pick one in BigBro Settings → Speech."
         case .generationFailed(let message):
             return message
         case .unknownModel(let name):

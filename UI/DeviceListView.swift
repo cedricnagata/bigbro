@@ -3,20 +3,9 @@ import SwiftUI
 struct DeviceListView: View {
     @EnvironmentObject var pairingManager: PairingManager
     @EnvironmentObject var mlxEngine: MLXEngine
-    @EnvironmentObject var speechEngine: SpeechEngine
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
-        // Gated on .unreachable, which SpeechEngine only reports when speech is enabled and
-        // failed to load — users who never turn it on never see this. MLXEngine has no
-        // equivalent banner: it runs in-process, so there is no "not running" state, only
-        // "not downloaded yet" (surfaced in Settings instead).
-        if speechEngine.status == .unreachable {
-            Label("Speech models failed to load", systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.orange)
-                .font(.caption)
-        }
-
         if pairingManager.approvedDevices.isEmpty {
             Text("No paired devices")
         } else {

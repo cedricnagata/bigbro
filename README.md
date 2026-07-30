@@ -55,7 +55,13 @@ parsing and their own output framing (`<think>` tags, or none at all).
 
 Text-to-speech (Kokoro) and speech-to-text (Parakeet) run in-process via
 [FluidAudio](https://github.com/FluidInference/FluidAudio) on CoreML/Neural Engine — again, no
-separate server. Off by default; enabling it in Settings triggers loading both models.
+separate server. Each is a model in its own right, downloaded/run/stopped/removed from Settings
+exactly like a language or vision model — there is no "enable speech" switch. A speech model
+also starts lazily the same way: the first `speechRequest`/`transcribeRequest` that needs it
+triggers the load if it isn't already running.
+
+Voice selection (which Kokoro speaker to use) is a BigBroKit parameter, not a Mac setting — see
+`BigBroClient.defaultVoice`. The Mac has no configured default of its own.
 
 Synthesized audio is always 24 kHz 16-bit mono PCM — the only format Kokoro produces, and what
 BigBroKit's `BigBroAudioPlayer` expects.
@@ -79,9 +85,10 @@ Open **Settings** (⌘,) for two tabs:
   (tools, images, reasoning), size, and lifecycle state: not downloaded / downloading (%) /
   downloaded / starting / running, with **Download**, **Run**, **Stop** and **Remove** buttons
   as they apply
-- **Speech** — off by default; when enabled, shows one row per speech model (Kokoro, Parakeet)
-  with its own download progress, plus a free-form Kokoro voice field (e.g. `af_heart`) and
-  **Preview**
+- **TTS models** / **STT models** — Kokoro and Parakeet, each its own section with the same
+  lifecycle state and **Download** / **Run** / **Stop** / **Remove** buttons as the language and
+  vision sections. No voice picker here — voice is chosen per request by the connecting app
+  (`BigBroClient.defaultVoice`), not configured on the Mac
 
 **Devices** — paired device management:
 - Each connected device shows its required models, each resolved to the catalog entry that satisfies it, with install status (✓ / ✗)
@@ -226,12 +233,12 @@ optimizations — skipping `run` is harmless, since a request starts the model i
 working.
 
 `"tts"`, `"stt"` and `"speech"` (both) start Kokoro and Parakeet instead, via
-`BigBroClient.runSpeech()`. BigBro already starts these at launch whenever speech is enabled,
-so this is usually instant — its real job is giving a client somewhere to *wait*. That matters
-for a hands-free voice loop, where a cold model load would otherwise swallow the first thing
-the user says. Errors if speech is switched off in Settings. There is no matching stop: speech
-models are shared and reload slowly, so letting one client evict them for everyone isn't a
-trade worth offering.
+`BigBroClient.runSpeech()`. Like a language model, BigBro loads these lazily on whichever
+request needs them first — `run` just gives a client somewhere to *wait* ahead of that. That
+matters for a hands-free voice loop, where a cold model load would otherwise swallow the first
+thing the user says. There is no matching stop from a client: speech models are shared and
+reload slowly, so letting one client evict them for everyone isn't a trade worth offering.
+Whoever owns the Mac can still stop or remove them locally, in Settings.
 
 ### Spoken conversation
 
@@ -273,7 +280,7 @@ Required entitlements (already configured in the project):
 bigbro/
 ├── App/
 │   ├── bigbroApp.swift         — app entry, AppModel, AppRouter
-│   ├── AppSettings.swift       — default model ids, speech toggle + voice (UserDefaults)
+│   ├── AppSettings.swift       — default model ids (UserDefaults)
 │   ├── BackendStatus.swift     — BackendStatus enum, BackendStatusReporting protocol
 │   ├── ModelInstalling.swift   — install protocol (ModelInstallProgress)
 │   └── ModelDownloader.swift   — coordinates installs, publishes throttled progress
@@ -281,9 +288,9 @@ bigbro/
 │   ├── ModelCatalog.swift      — the supported models and their hand-verified capabilities
 │   ├── MLXEngine.swift         — loads/runs catalog models via MLX, capability negotiation, message translation
 │   ├── ResponseParser.swift    — per-model output framing: harmony channels, <think> tags, or plain
-│   └── MLXInstaller.swift      — ModelInstalling conformer backed by MLXEngine.ensureLoaded
+│   └── MLXInstaller.swift      — ModelInstalling conformer backed by MLXEngine.download
 ├── Speech/
-│   └── SpeechEngine.swift      — Kokoro TTS + Parakeet STT via FluidAudio
+│   └── SpeechEngine.swift      — Kokoro TTS + Parakeet STT via FluidAudio, same download/run/stop/remove lifecycle as MLXEngine
 ├── Server/
 │   ├── PeerServer.swift        — TCP server (NWListener)
 │   ├── BonjourAdvertiser.swift — mDNS advertisement (_bigbro._tcp.)
@@ -291,6 +298,5 @@ bigbro/
 │   └── PowerAssertion.swift    — keeps the Mac awake while peers are connected
 └── UI/
     ├── DeviceListView.swift     — menu bar device list with model status
-    ├── SpeechPreview.swift      — auditions a voice locally via AVAudioPlayer
-    └── SettingsView.swift       — settings tabs (model defaults + catalog, speech models, devices)
+    └── SettingsView.swift       — settings tabs (model defaults + catalog, TTS/STT models, devices)
 ```

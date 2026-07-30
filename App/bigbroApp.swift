@@ -12,7 +12,6 @@ struct BigBroApp: App {
             DeviceListView()
                 .environmentObject(appModel.pairingManager)
                 .environmentObject(appModel.mlxEngine)
-                .environmentObject(appModel.speechEngine)
                 .environmentObject(appModel.modelDownloader)
                 .onAppear { appDelegate.appModel = appModel }
         }
@@ -59,19 +58,6 @@ final class AppModel: ObservableObject {
         router = AppRouter(pairingManager: pairingManager, modelDownloader: modelDownloader)
         pairingManager.peerServer = server
         pairingManager.modelDownloader = modelDownloader
-
-        // Loading Kokoro + Parakeet is not free, so it only happens once the user actually
-        // opts in — but that includes "already opted in": `$speechEnabled` publishes its
-        // current value immediately on subscription, so if speech was left on from a
-        // previous launch this fires right away rather than needing a fresh toggle.
-        // `ensureLoaded` is idempotent, so re-firing on every `true` costs nothing.
-        AppSettings.shared.$speechEnabled
-            .filter { $0 }
-            .sink { _ in
-                Task { try? await SpeechEngine.shared.ensureLoaded(.tts) }
-                Task { try? await SpeechEngine.shared.ensureLoaded(.stt) }
-            }
-            .store(in: &cancellables)
 
         modelDownloader.updates
             .sink { [weak self] update in
@@ -519,14 +505,12 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         deviceId: String,
         server: PeerServer
     ) async {
-        guard await speechReady(requestId: requestId, deviceId: deviceId, server: server) else { return }
-
         print("[AppRouter] speech preload requested by \(deviceId.prefix(8)) for \(kinds.map(\.displayName).joined(separator: ", "))")
         do {
             // Sequential, not concurrent: both are CoreML/Neural-Engine loads, so racing them
             // contends for the same compiler and finishes no sooner.
             for kind in kinds {
-                try await speechEngine.ensureLoaded(kind)
+                try await speechEngine.run(kind)
             }
             print("[AppRouter] speech preload complete for \(deviceId.prefix(8))")
             await server.send(["type": "done", "requestId": requestId], to: deviceId)
@@ -542,14 +526,6 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
     /// beats buffering it unboundedly.
     private static let maxUploadBytes = 10 * 1024 * 1024
 
-    private func speechReady(requestId: String, deviceId: String, server: PeerServer) async -> Bool {
-        guard await MainActor.run(body: { AppSettings.shared.speechEnabled }) else {
-            await fail(requestId, "Speech is not enabled in BigBro Settings.", deviceId: deviceId, server: server)
-            return false
-        }
-        return true
-    }
-
     private func fail(_ requestId: String, _ message: String, deviceId: String, server: PeerServer) async {
         print("[AppRouter] \(requestId.prefix(8)): \(message)")
         await server.send(["type": "error", "requestId": requestId, "message": message], to: deviceId)
@@ -561,11 +537,12 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
             print("[AppRouter] handleSpeechRequest: missing requestId or input")
             return
         }
-        guard await speechReady(requestId: requestId, deviceId: deviceId, server: server) else { return }
 
         let voice = message["voice"] as? String
         let speed = message["speed"] as? Double
-        let resolvedVoice = await MainActor.run { voice?.isEmpty == false ? voice! : AppSettings.shared.ttsVoice }
+        // Every current BigBroKit always sends a concrete voice (see `BigBroClient.speak`);
+        // this only covers a raw wire request from something else that omitted it.
+        let resolvedVoice = voice?.isEmpty == false ? voice! : SpeechEngine.defaultVoice
 
         do {
             // Headerless PCM describes nothing about itself, so the client is told the
@@ -609,7 +586,6 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
             print("[AppRouter] handleTranscribeRequest: missing requestId or audio")
             return
         }
-        guard await speechReady(requestId: requestId, deviceId: deviceId, server: server) else { return }
 
         guard let audio = Data(base64Encoded: base64) else {
             await fail(requestId, "Audio payload was not valid base64.", deviceId: deviceId, server: server)
