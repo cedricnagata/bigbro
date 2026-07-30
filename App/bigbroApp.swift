@@ -270,6 +270,34 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         }
     }
 
+    // MARK: - Reasoning
+
+    /// The reasoning budgets gpt-oss will accept. The Harmony template renders the value
+    /// straight into the system message as `Reasoning: <level>`, and the model was trained on
+    /// exactly these three words — a fourth would land in the prompt as text it has never
+    /// seen. There is deliberately no "off". Anything unrecognized is dropped rather than
+    /// forwarded, so a client sending junk gets the template default, not a poisoned prompt.
+    private static let validReasoningEfforts: Set<String> = ["low", "medium", "high"]
+
+    /// Resolves the effort for one request.
+    ///
+    /// An explicit `reasoning_effort` from the client always wins — that is the client saying
+    /// how hard the model should think, independent of whether it wants to see the result.
+    /// Absent one, `think: false` is read as a hint that the caller wants speed and has no
+    /// use for the trace, so the budget drops to "low"; this is what that flag alone did
+    /// before clients could ask for a level, and keeps their behavior unchanged. When neither
+    /// is specified the template's own default ("medium") stands.
+    private func resolveReasoningEffort(_ message: [String: Any], sendReasoning: Bool) -> String? {
+        if let requested = message["reasoning_effort"] as? String {
+            guard Self.validReasoningEfforts.contains(requested.lowercased()) else {
+                print("[AppRouter] ignoring unrecognized reasoning_effort '\(requested)'")
+                return nil
+            }
+            return requested.lowercased()
+        }
+        return sendReasoning ? nil : "low"
+    }
+
     // MARK: - Request handlers
 
     private func handleRequest(_ message: [String: Any], server: PeerServer, deviceId: String) async {
@@ -283,12 +311,12 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         // Absent means "unspecified", which defaults to on — this is what every client sent
         // before `think` existed, so their behavior (reasoning always forwarded) is unchanged.
         let sendReasoning = (message["think"] as? Bool) ?? true
-        // "low" actually shortens the model's analysis-channel generation before it reaches
+        // Effort actually shortens the model's analysis-channel generation before it reaches
         // the final channel — unlike sendReasoning, which only affects what's forwarded after
-        // the fact. Left unset (template default, "medium") when reasoning is wanted.
-        let reasoningEffort = sendReasoning ? nil : "low"
+        // the fact.
+        let reasoningEffort = resolveReasoningEffort(message, sendReasoning: sendReasoning)
 
-        print("[AppRouter] handleRequest: requestId=\(requestId.prefix(8)) tools=\(tools.count) messages=\(messagesRaw.count) think=\(sendReasoning)")
+        print("[AppRouter] handleRequest: requestId=\(requestId.prefix(8)) tools=\(tools.count) messages=\(messagesRaw.count) think=\(sendReasoning) effort=\(reasoningEffort ?? "default")")
 
         let kind = mlxEngine.kind(for: messagesRaw)
         guard await ensureModelReady(kind, requestId: requestId, deviceId: deviceId, server: server) else { return }
@@ -307,9 +335,9 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         let system  = message["system"] as? String
         let options = message["options"] as? [String: Any]
         let sendReasoning = (message["think"] as? Bool) ?? true
-        let reasoningEffort = sendReasoning ? nil : "low"
+        let reasoningEffort = resolveReasoningEffort(message, sendReasoning: sendReasoning)
 
-        print("[AppRouter] handleGenerateRequest: requestId=\(requestId.prefix(8)) prompt='\(prompt.prefix(40))…' think=\(sendReasoning)")
+        print("[AppRouter] handleGenerateRequest: requestId=\(requestId.prefix(8)) prompt='\(prompt.prefix(40))…' think=\(sendReasoning) effort=\(reasoningEffort ?? "default")")
 
         var messagesRaw: [[String: Any]] = []
         if let system, !system.isEmpty {

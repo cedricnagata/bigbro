@@ -102,8 +102,8 @@ existing BigBroKit clients work against this branch without a rebuild.
 | Type | Fields | Description |
 |---|---|---|
 | `hello` | `deviceId`, `deviceName`, `appName`, `requiredModels?` | Initiate pairing |
-| `request` | `requestId`, `messages`, `streaming`, `tools?`, `model?`, `options?` | Chat request |
-| `generateRequest` | `requestId`, `prompt`, `streaming`, `images?`, `system?`, `model?`, `options?` | Single-turn generate |
+| `request` | `requestId`, `messages`, `streaming`, `tools?`, `model?`, `options?`, `think?`, `reasoning_effort?` | Chat request |
+| `generateRequest` | `requestId`, `prompt`, `streaming`, `images?`, `system?`, `model?`, `options?`, `think?`, `reasoning_effort?` | Single-turn generate |
 | `speechRequest` | `requestId`, `input`, `voice?`, `speed?` | Text-to-speech |
 | `transcribeRequest` | `requestId`, `audio` (base64), `audioFormat?` | Speech-to-text. Max 10 MB decoded |
 | `preload` | `requestId`, `model?` (`"text"` / `"vision"`, default `"text"`) | Loads a model into memory without generating anything — see below |
@@ -111,10 +111,31 @@ existing BigBroKit clients work against this branch without a rebuild.
 
 Routing is decided by request content (images present → vision model), not by the `model` field.
 `format` (JSON-schema-constrained output) and `keep_alive` are accepted for wire compatibility
-but currently have no effect — both models stay resident regardless of idle time. `think`
-(default on) gates whether reasoning tokens are sent to the client as `thinking` messages;
-gpt-oss computes its harmony `analysis` channel either way, so this only controls what goes
-out over the wire, not what the model does.
+but currently have no effect — both models stay resident regardless of idle time.
+
+### Reasoning: `think` vs `reasoning_effort`
+
+Two separate knobs, and the difference matters:
+
+| Field | What it changes | Where it acts |
+|---|---|---|
+| `think` (default on) | Whether reasoning tokens are sent to the client as `thinking` messages | After generation — pure wire filtering in `AppRouter` |
+| `reasoning_effort` | How long the model spends in its `analysis` channel before reaching the final one | Before generation — passed to the chat template as `additionalContext` |
+
+gpt-oss computes its harmony `analysis` channel either way, so `think` alone changes what the
+client sees, not what the model does or how long it takes. `reasoning_effort` is the one that
+actually shortens the work.
+
+Valid values are **`low`, `medium`, `high`** — nothing else. The Harmony template renders the
+value literally into the system message as `Reasoning: <level>`, and gpt-oss was trained on
+exactly those three words, so there is no "off": a fourth value would land in the prompt as
+text the model has never seen, degrading the answer rather than skipping the analysis. `low`
+is as close to off as gpt-oss gets. Unrecognized values are dropped and the template default
+(`medium`) applies.
+
+When `reasoning_effort` is absent, `think: false` is read as a request for speed and lowers
+the budget to `low` — preserving what that flag did on its own before clients could name a
+level. An explicit `reasoning_effort` always wins over that inference.
 
 ### Preloading a model
 
