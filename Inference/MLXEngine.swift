@@ -198,10 +198,17 @@ final class MLXEngine: ObservableObject, BackendStatusReporting {
         isDownloaded(.matching(declaredName: name))
     }
 
+    /// Passed as `additionalContext` to the chat template, which forwards it into the Harmony
+    /// system message as `Reasoning: <level>`. This is a generation-time lever, unlike
+    /// `AppRouter`'s `sendReasoning` flag, which only gates what's forwarded to the peer after
+    /// generation — `reasoningEffort` is what actually changes how long the model spends in
+    /// the analysis channel before it reaches the final one. `nil` leaves the template's own
+    /// default (gpt-oss defaults to "medium") in place.
     func chatStream(
         messages rawMessages: [[String: Any]],
         tools rawTools: [[String: Any]],
-        options: [String: Any]?
+        options: [String: Any]?,
+        reasoningEffort: String? = nil
     ) -> AsyncThrowingStream<InferenceEvent, Error> {
         AsyncThrowingStream { continuation in
             Task {
@@ -211,7 +218,8 @@ final class MLXEngine: ObservableObject, BackendStatusReporting {
                     let toolSpecs = Self.toolSpecs(from: rawTools)
 
                     let container = try await self.ensureLoaded(kind)
-                    let userInput = UserInput(chat: chatMessages, tools: toolSpecs)
+                    let additionalContext = reasoningEffort.map { ["reasoning_effort": $0] }
+                    let userInput = UserInput(chat: chatMessages, tools: toolSpecs, additionalContext: additionalContext)
                     let parameters = Self.generateParameters(from: options)
 
                     let stream: AsyncStream<Generation> = try await container.perform { (context: ModelContext) in

@@ -283,13 +283,17 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         // Absent means "unspecified", which defaults to on — this is what every client sent
         // before `think` existed, so their behavior (reasoning always forwarded) is unchanged.
         let sendReasoning = (message["think"] as? Bool) ?? true
+        // "low" actually shortens the model's analysis-channel generation before it reaches
+        // the final channel — unlike sendReasoning, which only affects what's forwarded after
+        // the fact. Left unset (template default, "medium") when reasoning is wanted.
+        let reasoningEffort = sendReasoning ? nil : "low"
 
         print("[AppRouter] handleRequest: requestId=\(requestId.prefix(8)) tools=\(tools.count) messages=\(messagesRaw.count) think=\(sendReasoning)")
 
         let kind = mlxEngine.kind(for: messagesRaw)
         guard await ensureModelReady(kind, requestId: requestId, deviceId: deviceId, server: server) else { return }
 
-        let stream = mlxEngine.chatStream(messages: messagesRaw, tools: tools, options: options)
+        let stream = mlxEngine.chatStream(messages: messagesRaw, tools: tools, options: options, reasoningEffort: reasoningEffort)
         await drain(stream, requestId: requestId, deviceId: deviceId, server: server, label: "Request", sendReasoning: sendReasoning)
     }
 
@@ -303,6 +307,7 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         let system  = message["system"] as? String
         let options = message["options"] as? [String: Any]
         let sendReasoning = (message["think"] as? Bool) ?? true
+        let reasoningEffort = sendReasoning ? nil : "low"
 
         print("[AppRouter] handleGenerateRequest: requestId=\(requestId.prefix(8)) prompt='\(prompt.prefix(40))…' think=\(sendReasoning)")
 
@@ -317,7 +322,7 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         let kind = mlxEngine.kind(for: messagesRaw)
         guard await ensureModelReady(kind, requestId: requestId, deviceId: deviceId, server: server) else { return }
 
-        let stream = mlxEngine.chatStream(messages: messagesRaw, tools: [], options: options)
+        let stream = mlxEngine.chatStream(messages: messagesRaw, tools: [], options: options, reasoningEffort: reasoningEffort)
         await drain(stream, requestId: requestId, deviceId: deviceId, server: server, label: "Generate", sendReasoning: sendReasoning)
     }
 
