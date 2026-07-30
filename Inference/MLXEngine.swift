@@ -311,9 +311,10 @@ final class MLXEngine: ObservableObject, BackendStatusReporting {
 
     /// Deletes a model's downloaded weights. Stops it first if it is running.
     ///
-    /// Only ever deletes a directory the downloader itself reported. A model whose path was
-    /// never recorded — downloaded by a build before paths were tracked — has nothing safe to
-    /// delete, so it is forgotten rather than guessed at, and the next run re-resolves it.
+    /// Only ever deletes a directory derived from one the downloader itself reported. A model
+    /// whose path was never recorded — downloaded by a build before paths were tracked — has
+    /// nothing safe to delete, so it is forgotten rather than guessed at, and the next run
+    /// re-resolves it.
     func remove(_ model: BigBroModel) throws {
         let id = model.id
         stop(id)
@@ -326,13 +327,34 @@ final class MLXEngine: ObservableObject, BackendStatusReporting {
             stateChanged()
             return
         }
-        let url = URL(fileURLWithPath: path)
-        if FileManager.default.fileExists(atPath: path) {
-            try FileManager.default.removeItem(at: url)
-            print("[MLXEngine] removed \(id) from \(path)")
+        let recorded = URL(fileURLWithPath: path)
+        let target = Self.hubRepositoryRoot(containing: recorded) ?? recorded
+        if FileManager.default.fileExists(atPath: target.path) {
+            try FileManager.default.removeItem(at: target)
+            print("[MLXEngine] removed \(id) from \(target.path)")
         }
         forgetDownload(id)
         stateChanged()
+    }
+
+    /// The repository directory to delete in order to actually reclaim a model's disk.
+    ///
+    /// The Hugging Face cache stores a model's bytes once and names them twice: the data lives
+    /// in `<repo>/blobs/<etag>`, and `<repo>/snapshots/<commit>/<file>` is a tree of symlinks
+    /// pointing into it. `mlx-swift-lm` reports the *snapshot* directory, so deleting only that
+    /// reclaims nothing — it removes the links and leaves every gigabyte of blob behind, and
+    /// the next download relinks them without a byte crossing the network, which is
+    /// indistinguishable from a remove that silently did nothing.
+    ///
+    /// Returns the repository root when the recorded path really is a snapshot inside one.
+    /// Anything shaped differently returns nil and is deleted as-is — a path this cannot
+    /// positively identify is not one to go deleting the parents of.
+    private static func hubRepositoryRoot(containing directory: URL) -> URL? {
+        let snapshots = directory.deletingLastPathComponent()
+        guard snapshots.lastPathComponent == "snapshots" else { return nil }
+        let repository = snapshots.deletingLastPathComponent()
+        guard repository.lastPathComponent.hasPrefix("models--") else { return nil }
+        return repository
     }
 
     // MARK: - Download bookkeeping

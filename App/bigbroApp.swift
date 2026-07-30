@@ -59,6 +59,13 @@ final class AppModel: ObservableObject {
         pairingManager.peerServer = server
         pairingManager.modelDownloader = modelDownloader
 
+        // An interrupted download leaves its scratch file behind at full size, and nothing else
+        // ever reclaims it. Detached because it is filesystem work nothing here waits on —
+        // launch should not block on housekeeping.
+        Task.detached(priority: .utility) {
+            TemporaryFileCleaner.removeStaleDownloads()
+        }
+
         modelDownloader.updates
             .sink { [weak self] update in
                 self?.pairingManager.broadcastDownloadProgress(model: update.model, progress: update.progress)

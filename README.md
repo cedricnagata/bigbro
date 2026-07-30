@@ -283,7 +283,8 @@ bigbro/
 │   ├── AppSettings.swift       — default model ids (UserDefaults)
 │   ├── BackendStatus.swift     — BackendStatus enum, BackendStatusReporting protocol
 │   ├── ModelInstalling.swift   — install protocol (ModelInstallProgress)
-│   └── ModelDownloader.swift   — coordinates installs, publishes throttled progress
+│   ├── ModelDownloader.swift   — coordinates installs, publishes throttled progress
+│   └── TemporaryFileCleaner.swift — reclaims scratch files left by interrupted downloads
 ├── Inference/
 │   ├── ModelCatalog.swift      — the supported models and their hand-verified capabilities
 │   ├── MLXEngine.swift         — loads/runs catalog models via MLX, capability negotiation, message translation
