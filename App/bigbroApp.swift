@@ -11,8 +11,8 @@ struct BigBroApp: App {
         MenuBarExtra("BigBro", image: "bigbro") {
             DeviceListView()
                 .environmentObject(appModel.pairingManager)
-                .environmentObject(appModel.ollamaMonitor)
-                .environmentObject(appModel.speechMonitor)
+                .environmentObject(appModel.mlxEngine)
+                .environmentObject(appModel.speechEngine)
                 .environmentObject(appModel.modelDownloader)
                 .onAppear { appDelegate.appModel = appModel }
         }
@@ -20,8 +20,8 @@ struct BigBroApp: App {
         Settings {
             SettingsView()
                 .environmentObject(appModel.pairingManager)
-                .environmentObject(appModel.ollamaMonitor)
-                .environmentObject(appModel.speechMonitor)
+                .environmentObject(appModel.mlxEngine)
+                .environmentObject(appModel.speechEngine)
                 .environmentObject(appModel.modelDownloader)
         }
     }
@@ -47,8 +47,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 final class AppModel: ObservableObject {
     let pairingManager = PairingManager()
-    let ollamaMonitor = OllamaMonitor()
-    let speechMonitor = SpeechMonitor()
+    let mlxEngine = MLXEngine.shared
+    let speechEngine = SpeechEngine.shared
     let modelDownloader = ModelDownloader()
     private let server = PeerServer()
     private let advertiser = BonjourAdvertiser()
@@ -56,27 +56,20 @@ final class AppModel: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
 
     init() {
-        router = AppRouter(pairingManager: pairingManager, ollamaMonitor: ollamaMonitor,
-                           speechMonitor: speechMonitor, modelDownloader: modelDownloader)
+        router = AppRouter(pairingManager: pairingManager, modelDownloader: modelDownloader)
         pairingManager.peerServer = server
-        pairingManager.ollamaMonitor = ollamaMonitor
         pairingManager.modelDownloader = modelDownloader
-        ollamaMonitor.start()
-        speechMonitor.start()
 
-        // The poll would pick this up within 5s anyway; refreshing on the toggle makes
-        // enabling speech feel immediate.
+        // Loading Kokoro + Parakeet is not free, so it only happens once the user actually
+        // opts in — but that includes "already opted in": `$speechEnabled` publishes its
+        // current value immediately on subscription, so if speech was left on from a
+        // previous launch this fires right away rather than needing a fresh toggle.
+        // `ensureLoaded` is idempotent, so re-firing on every `true` costs nothing.
         AppSettings.shared.$speechEnabled
-            .dropFirst()
-            .sink { [weak self] _ in
-                Task { @MainActor in await self?.speechMonitor.refresh() }
-            }
-            .store(in: &cancellables)
-
-        ollamaMonitor.$installedModels
-            .dropFirst()
-            .sink { [weak self] _ in
-                self?.pairingManager.pushModelsUpdate()
+            .filter { $0 }
+            .sink { _ in
+                Task { try? await SpeechEngine.shared.ensureLoaded(.tts) }
+                Task { try? await SpeechEngine.shared.ensureLoaded(.stt) }
             }
             .store(in: &cancellables)
 
@@ -84,8 +77,7 @@ final class AppModel: ObservableObject {
             .sink { [weak self] update in
                 self?.pairingManager.broadcastDownloadProgress(model: update.model, progress: update.progress)
                 if update.progress.done && update.progress.error == nil {
-                    // Refresh installed model list so connected peers' missingModels updates.
-                    Task { await self?.ollamaMonitor.refresh() }
+                    self?.pairingManager.pushModelsUpdate()
                 }
             }
             .store(in: &cancellables)
@@ -104,8 +96,6 @@ final class AppModel: ObservableObject {
 
     func shutdown() async {
         print("[BigBro] Shutting down")
-        ollamaMonitor.stop()
-        speechMonitor.stop()
         await server.shutdown()
     }
 }
@@ -114,22 +104,17 @@ final class AppModel: ObservableObject {
 
 final class AppRouter: PeerServerDelegate, @unchecked Sendable {
     private let pairingManager: PairingManager
-    private let proxy = OpenAIProxy()
-    private let ollamaMonitor: OllamaMonitor
-    private let speechMonitor: SpeechMonitor
+    private let mlxEngine = MLXEngine.shared
+    private let speechEngine = SpeechEngine.shared
     private let modelDownloader: ModelDownloader
     private let powerAssertion = PowerAssertion()
     weak var server: PeerServer?
 
     init(
         pairingManager: PairingManager,
-        ollamaMonitor: OllamaMonitor,
-        speechMonitor: SpeechMonitor,
         modelDownloader: ModelDownloader
     ) {
         self.pairingManager = pairingManager
-        self.ollamaMonitor = ollamaMonitor
-        self.speechMonitor = speechMonitor
         self.modelDownloader = modelDownloader
         print("[AppRouter] Initialized")
     }
@@ -169,6 +154,9 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         case "transcribeRequest":
             print("[AppRouter] transcribeRequest from \(deviceId.prefix(8))")
             await handleTranscribeRequest(message, server: server, deviceId: deviceId)
+        case "preload":
+            print("[AppRouter] preload from \(deviceId.prefix(8))")
+            await handlePreloadRequest(message, server: server, deviceId: deviceId)
         case "bye":
             print("[AppRouter] bye from \(deviceId.prefix(8)), marking disconnected")
             await MainActor.run { pairingManager.markDisconnected(deviceId) }
@@ -195,21 +183,34 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
 
     // MARK: - Missing-model handling
 
-    private func handleMissingModel(_ model: String, requestId: String, deviceId: String, server: PeerServer) async {
-        let alreadyInProgress = await MainActor.run { modelDownloader.isDownloading(model) }
+    /// Returns true once `kind` is ready to use. If it isn't, kicks off (or reports) a
+    /// download and tells the peer, mirroring the old Ollama-missing-model flow so BigBroKit
+    /// clients need no changes. Callers that already know which model they need (a `preload`)
+    /// pass it directly; chat/generate derive it from message content via `mlxEngine.kind(for:)`.
+    private func ensureModelReady(
+        _ kind: MLXEngine.ModelKind,
+        requestId: String,
+        deviceId: String,
+        server: PeerServer
+    ) async -> Bool {
+        if mlxEngine.isDownloaded(kind) { return true }
+
+        let modelName = kind.displayName
+        let alreadyInProgress = modelDownloader.isDownloading(modelName)
         if !alreadyInProgress {
-            print("[AppRouter] Model '\(model)' missing — starting download for \(deviceId.prefix(8))")
-            await MainActor.run { modelDownloader.startDownload(model) }
+            print("[AppRouter] Model '\(modelName)' missing — starting download for \(deviceId.prefix(8))")
+            modelDownloader.startDownload(modelName)
         } else {
-            print("[AppRouter] Model '\(model)' already downloading — informing \(deviceId.prefix(8))")
+            print("[AppRouter] Model '\(modelName)' already downloading — informing \(deviceId.prefix(8))")
         }
         await server.send([
             "type": "modelDownloading",
             "requestId": requestId,
-            "model": model,
+            "model": modelName,
             "alreadyInProgress": alreadyInProgress,
         ], to: deviceId)
         await server.send(["type": "done", "requestId": requestId], to: deviceId)
+        return false
     }
 
     // MARK: - Event forwarding
@@ -219,21 +220,82 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
     /// Reasoning goes out as its own message type rather than folded into `chunk`: the
     /// client pipes chunks to text-to-speech, so merging them would have the model narrate
     /// its own deliberation aloud. Clients that predate this type ignore it.
+    ///
+    /// `sendReasoning` gates only what goes out over the wire, not generation itself — the
+    /// model still produces the analysis channel either way, so a client that wants a faster
+    /// perceived response can opt out of receiving it without changing what gets computed.
     private func send(
         _ event: InferenceEvent,
         requestId: String,
         deviceId: String,
-        server: PeerServer
+        server: PeerServer,
+        sendReasoning: Bool
     ) async {
         switch event {
         case .delta(let text):
             await server.send(["type": "chunk", "requestId": requestId, "delta": text], to: deviceId)
         case .reasoning(let text):
+            guard sendReasoning else { return }
             await server.send(["type": "thinking", "requestId": requestId, "delta": text], to: deviceId)
         case .toolCalls(let calls):
             print("[AppRouter] toolCall detected for \(requestId.prefix(8)): \(calls.count)")
             await server.send(["type": "toolCall", "requestId": requestId, "calls": calls], to: deviceId)
         }
+    }
+
+    /// Drains an inference stream to the peer. `request` and `generateRequest` both funnel
+    /// through here — the old split between a streamed and single-shot code path existed
+    /// because the OpenAI-compatible backend had two different HTTP shapes; MLX generation is
+    /// always token-by-token, so there is only one path now regardless of the client's
+    /// `streaming` flag (which governs *client-side* accumulation, not what the Mac sends).
+    private func drain(
+        _ stream: AsyncThrowingStream<InferenceEvent, Error>,
+        requestId: String,
+        deviceId: String,
+        server: PeerServer,
+        label: String,
+        sendReasoning: Bool
+    ) async {
+        do {
+            var chunkCount = 0
+            for try await event in stream {
+                if case .delta = event { chunkCount += 1 }
+                await send(event, requestId: requestId, deviceId: deviceId, server: server, sendReasoning: sendReasoning)
+            }
+            print("[AppRouter] \(label) complete for \(requestId.prefix(8)): \(chunkCount) chunk(s)")
+            await server.send(["type": "done", "requestId": requestId], to: deviceId)
+        } catch {
+            print("[AppRouter] \(label) error for \(requestId.prefix(8)): \(error)")
+            await server.send(["type": "error", "requestId": requestId, "message": error.localizedDescription], to: deviceId)
+        }
+    }
+
+    // MARK: - Reasoning
+
+    /// The reasoning budgets gpt-oss will accept. The Harmony template renders the value
+    /// straight into the system message as `Reasoning: <level>`, and the model was trained on
+    /// exactly these three words — a fourth would land in the prompt as text it has never
+    /// seen. There is deliberately no "off". Anything unrecognized is dropped rather than
+    /// forwarded, so a client sending junk gets the template default, not a poisoned prompt.
+    private static let validReasoningEfforts: Set<String> = ["low", "medium", "high"]
+
+    /// Resolves the effort for one request.
+    ///
+    /// An explicit `reasoning_effort` from the client always wins — that is the client saying
+    /// how hard the model should think, independent of whether it wants to see the result.
+    /// Absent one, `think: false` is read as a hint that the caller wants speed and has no
+    /// use for the trace, so the budget drops to "low"; this is what that flag alone did
+    /// before clients could ask for a level, and keeps their behavior unchanged. When neither
+    /// is specified the template's own default ("medium") stands.
+    private func resolveReasoningEffort(_ message: [String: Any], sendReasoning: Bool) -> String? {
+        if let requested = message["reasoning_effort"] as? String {
+            guard Self.validReasoningEfforts.contains(requested.lowercased()) else {
+                print("[AppRouter] ignoring unrecognized reasoning_effort '\(requested)'")
+                return nil
+            }
+            return requested.lowercased()
+        }
+        return sendReasoning ? nil : "low"
     }
 
     // MARK: - Request handlers
@@ -244,61 +306,23 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
             print("[AppRouter] handleRequest: missing requestId or messages")
             return
         }
-        let tools     = (message["tools"] as? [[String: Any]]) ?? []
-        let streaming = message["streaming"] as? Bool ?? true
-        let model     = message["model"] as? String
-        let format    = message["format"]               // Any? — "json" string or schema dict
-        let options   = message["options"] as? [String: Any]
-        let think     = message["think"] as? Bool
-        let keepAlive = message["keep_alive"] as? String
+        let tools   = (message["tools"] as? [[String: Any]]) ?? []
+        let options = message["options"] as? [String: Any]
+        // Absent means "unspecified", which defaults to on — this is what every client sent
+        // before `think` existed, so their behavior (reasoning always forwarded) is unchanged.
+        let sendReasoning = (message["think"] as? Bool) ?? true
+        // Effort actually shortens the model's analysis-channel generation before it reaches
+        // the final channel — unlike sendReasoning, which only affects what's forwarded after
+        // the fact.
+        let reasoningEffort = resolveReasoningEffort(message, sendReasoning: sendReasoning)
 
-        print("[AppRouter] handleRequest: requestId=\(requestId.prefix(8)) streaming=\(streaming) tools=\(tools.count) messages=\(messagesRaw.count)")
+        print("[AppRouter] handleRequest: requestId=\(requestId.prefix(8)) tools=\(tools.count) messages=\(messagesRaw.count) think=\(sendReasoning) effort=\(reasoningEffort ?? "default")")
 
-        let resolvedModel = await MainActor.run {
-            model?.isEmpty == false ? model! : AppSettings.shared.defaultModel
-        }
-        let modelInstalled = await MainActor.run { ollamaMonitor.isInstalled(resolvedModel) }
-        if !modelInstalled {
-            await handleMissingModel(resolvedModel, requestId: requestId, deviceId: deviceId, server: server)
-            return
-        }
+        let kind = mlxEngine.kind(for: messagesRaw)
+        guard await ensureModelReady(kind, requestId: requestId, deviceId: deviceId, server: server) else { return }
 
-        do {
-            var chunkCount = 0
-            if streaming {
-                for try await event in proxy.chatStream(
-                    messages: messagesRaw,
-                    model: model,
-                    tools: tools,
-                    format: format,
-                    options: options,
-                    think: think,
-                    keepAlive: keepAlive
-                ) {
-                    if case .delta = event { chunkCount += 1 }
-                    await send(event, requestId: requestId, deviceId: deviceId, server: server)
-                }
-            } else {
-                for event in try await proxy.chat(
-                    messages: messagesRaw,
-                    model: model,
-                    tools: tools,
-                    format: format,
-                    options: options,
-                    think: think,
-                    keepAlive: keepAlive
-                ) {
-                    if case .delta = event { chunkCount += 1 }
-                    await send(event, requestId: requestId, deviceId: deviceId, server: server)
-                }
-            }
-            print("[AppRouter] Complete for \(requestId.prefix(8)): \(chunkCount) chunk(s)")
-            await server.send(["type": "done", "requestId": requestId], to: deviceId)
-            print("[AppRouter] done sent for \(requestId.prefix(8))")
-        } catch {
-            print("[AppRouter] Inference error for \(requestId.prefix(8)): \(error)")
-            await server.send(["type": "error", "requestId": requestId, "message": error.localizedDescription], to: deviceId)
-        }
+        let stream = mlxEngine.chatStream(messages: messagesRaw, tools: tools, options: options, reasoningEffort: reasoningEffort)
+        await drain(stream, requestId: requestId, deviceId: deviceId, server: server, label: "Request", sendReasoning: sendReasoning)
     }
 
     private func handleGenerateRequest(_ message: [String: Any], server: PeerServer, deviceId: String) async {
@@ -307,71 +331,94 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
             print("[AppRouter] handleGenerateRequest: missing requestId or prompt")
             return
         }
-        let images    = (message["images"] as? [String]) ?? []
-        let suffix    = message["suffix"] as? String
-        let system    = message["system"] as? String
-        let template  = message["template"] as? String
-        let model     = message["model"] as? String
-        let format    = message["format"]
-        let options   = message["options"] as? [String: Any]
-        let raw       = message["raw"] as? Bool
-        let think     = message["think"] as? Bool
-        let keepAlive = message["keep_alive"] as? String
-        let streaming = message["streaming"] as? Bool ?? true
+        let images  = (message["images"] as? [String]) ?? []
+        let system  = message["system"] as? String
+        let options = message["options"] as? [String: Any]
+        let sendReasoning = (message["think"] as? Bool) ?? true
+        let reasoningEffort = resolveReasoningEffort(message, sendReasoning: sendReasoning)
 
-        print("[AppRouter] handleGenerateRequest: requestId=\(requestId.prefix(8)) streaming=\(streaming) prompt='\(prompt.prefix(40))…'")
+        print("[AppRouter] handleGenerateRequest: requestId=\(requestId.prefix(8)) prompt='\(prompt.prefix(40))…' think=\(sendReasoning) effort=\(reasoningEffort ?? "default")")
 
-        let resolvedModel = await MainActor.run {
-            model?.isEmpty == false ? model! : AppSettings.shared.defaultModel
+        var messagesRaw: [[String: Any]] = []
+        if let system, !system.isEmpty {
+            messagesRaw.append(["role": "system", "content": system])
         }
-        let modelInstalled = await MainActor.run { ollamaMonitor.isInstalled(resolvedModel) }
-        if !modelInstalled {
-            await handleMissingModel(resolvedModel, requestId: requestId, deviceId: deviceId, server: server)
+        var user: [String: Any] = ["role": "user", "content": prompt]
+        if !images.isEmpty { user["images"] = images }
+        messagesRaw.append(user)
+
+        let kind = mlxEngine.kind(for: messagesRaw)
+        guard await ensureModelReady(kind, requestId: requestId, deviceId: deviceId, server: server) else { return }
+
+        let stream = mlxEngine.chatStream(messages: messagesRaw, tools: [], options: options, reasoningEffort: reasoningEffort)
+        await drain(stream, requestId: requestId, deviceId: deviceId, server: server, label: "Generate", sendReasoning: sendReasoning)
+    }
+
+    /// Loads a model into memory without generating anything, so a client can pay the
+    /// multi-second "materialize weights into MLX arrays" cost ahead of the user's first
+    /// message — e.g. when a chat screen opens — rather than that cost landing on the first
+    /// real request. Purely an optimization: nothing else in the app requires this message,
+    /// and skipping it is harmless since `chatStream` calls `ensureLoaded` lazily either way.
+    private func handlePreloadRequest(_ message: [String: Any], server: PeerServer, deviceId: String) async {
+        guard let requestId = message["requestId"] as? String else {
+            print("[AppRouter] handlePreloadRequest: missing requestId")
+            return
+        }
+        let requested = (message["model"] as? String)?.lowercased() ?? "text"
+
+        // Speech is warmed through its own engine. The Mac already loads Kokoro and Parakeet
+        // at launch when speech is enabled, so this is usually a no-op — but a client that
+        // connects while that is still in flight needs somewhere to *wait*, which matters for
+        // a voice loop: without it the first utterance eats the whole cold load.
+        if let speechKinds = Self.speechKinds(for: requested) {
+            await preloadSpeech(speechKinds, requestId: requestId, deviceId: deviceId, server: server)
             return
         }
 
+        let kind: MLXEngine.ModelKind = requested == "vision" ? .vision : .text
+
+        print("[AppRouter] preload requested by \(deviceId.prefix(8)) for \(kind.displayName)")
+        guard await ensureModelReady(kind, requestId: requestId, deviceId: deviceId, server: server) else { return }
+
         do {
-            var chunkCount = 0
-            if streaming {
-                for try await event in proxy.generateStream(
-                    prompt: prompt,
-                    images: images,
-                    system: system,
-                    template: template,
-                    suffix: suffix,
-                    model: model,
-                    format: format,
-                    options: options,
-                    raw: raw,
-                    think: think,
-                    keepAlive: keepAlive
-                ) {
-                    if case .delta = event { chunkCount += 1 }
-                    await send(event, requestId: requestId, deviceId: deviceId, server: server)
-                }
-            } else {
-                for event in try await proxy.generate(
-                    prompt: prompt,
-                    images: images,
-                    system: system,
-                    template: template,
-                    suffix: suffix,
-                    model: model,
-                    format: format,
-                    options: options,
-                    raw: raw,
-                    think: think,
-                    keepAlive: keepAlive
-                ) {
-                    if case .delta = event { chunkCount += 1 }
-                    await send(event, requestId: requestId, deviceId: deviceId, server: server)
-                }
-            }
-            print("[AppRouter] Generate complete for \(requestId.prefix(8)): \(chunkCount) chunk(s)")
+            try await mlxEngine.ensureLoaded(kind)
+            print("[AppRouter] preload complete for \(deviceId.prefix(8)): \(kind.displayName)")
             await server.send(["type": "done", "requestId": requestId], to: deviceId)
-            print("[AppRouter] done sent for \(requestId.prefix(8))")
         } catch {
-            print("[AppRouter] Generate error for \(requestId.prefix(8)): \(error)")
+            print("[AppRouter] preload error for \(deviceId.prefix(8)): \(error)")
+            await server.send(["type": "error", "requestId": requestId, "message": error.localizedDescription], to: deviceId)
+        }
+    }
+
+    /// Speech kinds named by a `preload` request, or nil if this isn't a speech preload.
+    private static func speechKinds(for requested: String) -> [SpeechEngine.ModelKind]? {
+        switch requested {
+        case "tts":    return [.tts]
+        case "stt":    return [.stt]
+        case "speech": return SpeechEngine.ModelKind.allCases
+        default:       return nil
+        }
+    }
+
+    private func preloadSpeech(
+        _ kinds: [SpeechEngine.ModelKind],
+        requestId: String,
+        deviceId: String,
+        server: PeerServer
+    ) async {
+        guard await speechReady(requestId: requestId, deviceId: deviceId, server: server) else { return }
+
+        print("[AppRouter] speech preload requested by \(deviceId.prefix(8)) for \(kinds.map(\.displayName).joined(separator: ", "))")
+        do {
+            // Sequential, not concurrent: both are CoreML/Neural-Engine loads, so racing them
+            // contends for the same compiler and finishes no sooner.
+            for kind in kinds {
+                try await speechEngine.ensureLoaded(kind)
+            }
+            print("[AppRouter] speech preload complete for \(deviceId.prefix(8))")
+            await server.send(["type": "done", "requestId": requestId], to: deviceId)
+        } catch {
+            print("[AppRouter] speech preload error for \(deviceId.prefix(8)): \(error)")
             await server.send(["type": "error", "requestId": requestId, "message": error.localizedDescription], to: deviceId)
         }
     }
@@ -382,21 +429,9 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
     /// beats buffering it unboundedly.
     private static let maxUploadBytes = 10 * 1024 * 1024
 
-    /// Speech requests are gated on the backend being enabled and reachable — and
-    /// deliberately *not* on model-list membership, the way `handleRequest` gates chat.
-    /// Some servers happily accept models they do not list, so gating there would produce
-    /// false negatives; a 4xx from the backend surfaces as a clean error instead.
     private func speechReady(requestId: String, deviceId: String, server: PeerServer) async -> Bool {
-        let (enabled, status) = await MainActor.run {
-            (AppSettings.shared.speechEnabled, speechMonitor.status)
-        }
-        if !enabled {
+        guard await MainActor.run(body: { AppSettings.shared.speechEnabled }) else {
             await fail(requestId, "Speech is not enabled in BigBro Settings.", deviceId: deviceId, server: server)
-            return false
-        }
-        if status != .running {
-            await fail(requestId, "Speech backend not reachable at \(AppSettings.speechBaseURL).",
-                       deviceId: deviceId, server: server)
             return false
         }
         return true
@@ -415,33 +450,26 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         }
         guard await speechReady(requestId: requestId, deviceId: deviceId, server: server) else { return }
 
-        let voice  = message["voice"] as? String
-        let model  = message["model"] as? String
-        let format = message["response_format"] as? String
-        let speed  = message["speed"] as? Double
-
-        let resolved = await MainActor.run { () -> (format: String, voice: String, model: String) in
-            let s = AppSettings.shared
-            return (format ?? s.ttsFormat, voice ?? s.ttsVoice, model ?? s.ttsModel)
-        }
+        let voice = message["voice"] as? String
+        let speed = message["speed"] as? Double
+        let resolvedVoice = await MainActor.run { voice?.isEmpty == false ? voice! : AppSettings.shared.ttsVoice }
 
         do {
             // Headerless PCM describes nothing about itself, so the client is told the
             // format up front — it needs the rate and channel count to configure playback
-            // before the first chunk lands.
+            // before the first chunk lands. Always pcm/24kHz/mono now — Kokoro has no other
+            // output shape, so there is nothing left to negotiate here.
             await server.send([
                 "type": "audioStart",
                 "requestId": requestId,
-                "format": resolved.format,
-                "sampleRate": 24_000,  // OpenAI's pcm rate; containers carry their own
+                "format": "pcm",
+                "sampleRate": SpeechEngine.sampleRate,
                 "channels": 1,
-                "model": resolved.model,
-                "voice": resolved.voice,
+                "voice": resolvedVoice,
             ], to: deviceId)
 
             var seq = 0
-            for try await chunk in proxy.synthesize(input: input, voice: voice, model: model,
-                                                    responseFormat: format, speed: speed) {
+            for try await chunk in speechEngine.synthesize(text: input, voice: voice, speed: speed) {
                 guard await server.isConnected(deviceId: deviceId) else {
                     print("[AppRouter] Peer \(deviceId.prefix(8)) gone, abandoning speech \(requestId.prefix(8))")
                     return
@@ -480,13 +508,10 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
             return
         }
 
-        let format   = message["audioFormat"] as? String ?? "wav"
-        let model    = message["model"] as? String
-        let language = message["language"] as? String
+        let format = message["audioFormat"] as? String ?? "wav"
 
         do {
-            let result = try await proxy.transcribe(audio: audio, format: format,
-                                                    model: model, language: language)
+            let result = try await speechEngine.transcribe(audio: audio, format: format)
             print("[AppRouter] Transcript for \(requestId.prefix(8)): \(result.text.count) chars")
             var reply: [String: Any] = [
                 "type": "transcript",

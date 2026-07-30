@@ -17,101 +17,51 @@ struct SettingsView: View {
 
 private struct GeneralSettingsTab: View {
     @ObservedObject private var settings = AppSettings.shared
-    @EnvironmentObject var ollamaMonitor: OllamaMonitor
-    @EnvironmentObject var speechMonitor: SpeechMonitor
     @StateObject private var preview = SpeechPreview()
 
     var body: some View {
         Form {
             Section {
-                LabeledContent(AppSettings.chatBaseURL) {
-                    BackendStatusView(monitor: ollamaMonitor)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                }
-
-                LabeledContent("Default Model") {
-                    Picker("Default Model", selection: $settings.defaultModel) {
-                        if !ollamaMonitor.installedModels.contains(settings.defaultModel) {
-                            Text(settings.defaultModel).tag(settings.defaultModel)
-                            Divider()
-                        }
-                        ForEach(ollamaMonitor.installedModels, id: \.self) { model in
-                            Text(model).tag(model)
-                        }
-                    }
-                    .labelsHidden()
-                    .disabled(ollamaMonitor.installedModels.isEmpty)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+                ForEach(MLXEngine.ModelKind.allCases, id: \.self) { kind in
+                    ModelRow(kind: kind)
                 }
             } header: {
-                Text("Text Generation")
+                Text("Text")
             } footer: {
-                Label("Default model is used when the iOS app doesn't specify one.", systemImage: "info.circle")
-                    .foregroundStyle(.secondary)
-                    .font(.caption)
+                Label(
+                    "gpt-oss-20b handles text and tool calls; Qwen2.5-VL-3B handles requests with images. Both run on this Mac — no separate server to install.",
+                    systemImage: "info.circle"
+                )
+                .foregroundStyle(.secondary)
+                .font(.caption)
             }
 
             Section {
                 Toggle("Enable speech", isOn: $settings.speechEnabled)
 
                 if settings.speechEnabled {
-                    LabeledContent(AppSettings.speechBaseURL) {
-                        BackendStatusView(monitor: speechMonitor)
-                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    ForEach(SpeechEngine.ModelKind.allCases, id: \.self) { kind in
+                        SpeechModelRow(kind: kind)
                     }
 
                     LabeledContent("Voice") {
                         HStack(spacing: 6) {
-                            // Free-form rather than a closed list: voice names are not
-                            // standardised across backends (af_heart vs alloy vs
-                            // en_US-amy-medium), and not every backend can list them.
+                            // Free-form rather than a closed list: FluidAudio does not
+                            // expose an enumerable voice list the way it does for models.
                             TextField("", text: $settings.ttsVoice)
                                 .labelsHidden()
                                 .frame(maxWidth: .infinity)
 
-                            if !speechMonitor.availableVoices.isEmpty {
-                                Menu("Choose") {
-                                    ForEach(speechMonitor.availableVoices, id: \.self) { voice in
-                                        Button(voice) { settings.ttsVoice = voice }
-                                    }
-                                }
-                                .fixedSize()
-                            }
-
                             Button(preview.isSynthesizing ? "…" : "Preview") {
                                 preview.play(voice: settings.ttsVoice)
                             }
-                            .disabled(preview.isSynthesizing || speechMonitor.status != .running)
+                            .disabled(preview.isSynthesizing || settings.ttsVoice.isEmpty)
                         }
                     }
 
-                    Text("Which speaker the model uses — `af_heart`, `alloy`, `en_US-amy-medium`. Voice names come from the model, not from the server.")
+                    Text("Which Kokoro speaker to use, e.g. `af_heart`, `am_adam`, `bf_emma`.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-
-                    BackendModelPicker(
-                        title: "Speech Model",
-                        value: $settings.ttsModel,
-                        options: speechMonitor.availableModels,
-                        help: "The installed model that performs synthesis — LocalAI names these from its gallery, e.g. kokoro, piper, chatterbox."
-                    )
-
-                    LabeledContent("Audio Format") {
-                        Picker("Audio Format", selection: $settings.ttsFormat) {
-                            ForEach(["pcm", "wav", "mp3", "opus", "flac"], id: \.self) { format in
-                                Text(format).tag(format)
-                            }
-                        }
-                        .labelsHidden()
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                    }
-
-                    BackendModelPicker(
-                        title: "Transcription Model",
-                        value: $settings.sttModel,
-                        options: speechMonitor.availableModels,
-                        help: "The installed speech-to-text model, e.g. `whisper-base`."
-                    )
 
                     if let error = preview.error {
                         Text(error)
@@ -123,7 +73,7 @@ private struct GeneralSettingsTab: View {
                 Text("Speech")
             } footer: {
                 Label(
-                    "Text-to-speech and transcription. Requires a server exposing /v1/audio/speech — LocalAI (port 8080) or Speaches (8000).",
+                    "Text-to-speech (Kokoro) and transcription (Parakeet), both on-device via FluidAudio.",
                     systemImage: "info.circle"
                 )
                 .foregroundStyle(.secondary)
@@ -134,66 +84,95 @@ private struct GeneralSettingsTab: View {
     }
 }
 
-/// Picks a model from the list the backend reports.
-///
-/// A closed list rather than free text: model names are backend-specific — LocalAI uses gallery
-/// names, Speaches uses Hugging Face ids, Kokoro-FastAPI just says `kokoro` — so a typed name is
-/// almost always wrong, and it only fails later as an HTTP 404 on the first request. `/v1/models`
-/// is part of the OpenAI spec, so unlike the voice list it can be relied on.
-///
-/// That endpoint reports every model the backend serves, chat models included, and carries no
-/// capability tag to filter on — so the same list backs both the speech and transcription pickers.
-private struct BackendModelPicker: View {
-    let title: String
-    @Binding var value: String
-    let options: [String]
-    var help: String?
+/// One row per fixed local model: its download/load state, and a button to fetch it.
+private struct ModelRow: View {
+    @EnvironmentObject var mlxEngine: MLXEngine
+    @EnvironmentObject var modelDownloader: ModelDownloader
+    let kind: MLXEngine.ModelKind
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            LabeledContent(title) {
-                Picker(title, selection: $value) {
-                    if value.isEmpty {
-                        Text("Select a model…").tag("")
-                    } else if !options.contains(value) {
-                        // Keep an unrecognised value selected and visible rather than letting
-                        // the picker silently snap to the first option — the stale name is the
-                        // thing the warning below is about.
-                        Text("\(value) — not installed").tag(value)
-                        Divider()
-                    }
-                    ForEach(options, id: \.self) { option in
-                        Text(option).tag(option)
-                    }
-                }
-                .labelsHidden()
-                .disabled(options.isEmpty)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-            }
+        let loaded = mlxEngine.isLoaded(kind)
+        let downloaded = mlxEngine.isDownloaded(kind)
+        let progress = modelDownloader.progress[kind.displayName]
 
-            if let problem {
-                Label(problem, systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            } else if let help {
-                Text(help)
-                    .font(.caption)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Image(systemName: loaded ? "checkmark.circle.fill" : (progress != nil ? "arrow.down.circle" : (downloaded ? "checkmark.circle" : "xmark.circle.fill")))
+                    .foregroundStyle(loaded ? .green : (progress != nil ? .blue : (downloaded ? .green : .red)))
+                Text(kind.displayName)
+                Spacer(minLength: 8)
+                if !downloaded && progress == nil {
+                    Button("Download") {
+                        modelDownloader.startDownload(kind.displayName)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+            if let progress {
+                if let err = progress.error {
+                    Text("Error: \(err)")
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                } else {
+                    ProgressView(value: progress.percent)
+                        .progressViewStyle(.linear)
+                        .controlSize(.mini)
+                    Text("\(progress.status) — \(Int((progress.percent * 100).rounded()))%")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            } else if downloaded && !loaded {
+                Text("Downloaded — loads on first use")
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
             }
         }
     }
+}
 
-    private var problem: String? {
-        if options.isEmpty {
-            return "The backend reported no models. Check it is reachable and has models installed."
+/// One row per speech model (Kokoro, Parakeet): its download/load state, and a button to
+/// fetch it. Mirrors `ModelRow`, but tracks state on `SpeechEngine` directly rather than
+/// through `ModelDownloader` — speech models aren't part of the wire protocol's
+/// required-model handshake, so there's no peer-facing download to coordinate.
+private struct SpeechModelRow: View {
+    @EnvironmentObject var speechEngine: SpeechEngine
+    let kind: SpeechEngine.ModelKind
+
+    var body: some View {
+        let loaded = speechEngine.isLoaded(kind)
+        let downloaded = speechEngine.isDownloaded(kind)
+        let progress = speechEngine.loadProgress[kind]
+        let error = speechEngine.loadErrors[kind]
+        let downloading = !loaded && error == nil && progress != nil
+
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Image(systemName: loaded ? "checkmark.circle.fill" : (downloading ? "arrow.down.circle" : (downloaded ? "checkmark.circle" : "xmark.circle.fill")))
+                    .foregroundStyle(loaded ? .green : (downloading ? .blue : (downloaded ? .green : .red)))
+                Text(kind.displayName)
+                Spacer(minLength: 8)
+                if !loaded && !downloading {
+                    Button("Download") {
+                        Task { try? await speechEngine.ensureLoaded(kind) }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+            if let error {
+                Text("Error: \(error)")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            } else if downloading, let progress {
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+                    .controlSize(.mini)
+                Text("\(Int((progress * 100).rounded()))%")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         }
-        if value.isEmpty {
-            return "No model selected."
-        }
-        if !options.contains(value) {
-            return "The backend does not list “\(value)”. Requests will fail with HTTP 404."
-        }
-        return nil
     }
 }
 
@@ -248,7 +227,7 @@ private struct DevicesSettingsTab: View {
 
 private struct DeviceRow: View {
     @EnvironmentObject var pairingManager: PairingManager
-    @EnvironmentObject var ollamaMonitor: OllamaMonitor
+    @EnvironmentObject var mlxEngine: MLXEngine
     @EnvironmentObject var modelDownloader: ModelDownloader
     let deviceId: String
 
@@ -271,7 +250,7 @@ private struct DeviceRow: View {
                     .foregroundStyle(.secondary)
                 if connected && !requiredModels.isEmpty {
                     ForEach(requiredModels, id: \.self) { model in
-                        ModelStatusRow(model: model)
+                        DeviceModelStatusRow(model: model)
                     }
                 }
             }
@@ -293,24 +272,28 @@ private struct DeviceRow: View {
     }
 }
 
-private struct ModelStatusRow: View {
-    @EnvironmentObject var ollamaMonitor: OllamaMonitor
+/// A device's declared-required-model name (legacy Ollama-style, e.g. `qwen3-vl:30b`) shown
+/// against whichever of the two fixed local models it maps to.
+private struct DeviceModelStatusRow: View {
+    @EnvironmentObject var mlxEngine: MLXEngine
     @EnvironmentObject var modelDownloader: ModelDownloader
     let model: String
 
+    private var kind: MLXEngine.ModelKind { .matching(declaredName: model) }
+
     var body: some View {
-        let installed = ollamaMonitor.isInstalled(model)
-        let progress = modelDownloader.progress[model]
+        let satisfied = mlxEngine.isRequiredModelSatisfied(model)
+        let progress = modelDownloader.progress[kind.displayName]
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                Image(systemName: installed ? "checkmark.circle.fill" : (progress != nil ? "arrow.down.circle" : "xmark.circle.fill"))
-                    .foregroundStyle(installed ? .green : (progress != nil ? .blue : .red))
-                Text(model)
+                Image(systemName: satisfied ? "checkmark.circle.fill" : (progress != nil ? "arrow.down.circle" : "xmark.circle.fill"))
+                    .foregroundStyle(satisfied ? .green : (progress != nil ? .blue : .red))
+                Text("\(model) → \(kind.displayName)")
                     .font(.caption)
                 Spacer(minLength: 8)
-                if !installed && progress == nil {
+                if !satisfied && progress == nil {
                     Button("Download") {
-                        modelDownloader.startDownload(model)
+                        modelDownloader.startDownload(kind.displayName)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.mini)
@@ -325,26 +308,11 @@ private struct ModelStatusRow: View {
                     ProgressView(value: progress.percent)
                         .progressViewStyle(.linear)
                         .controlSize(.mini)
-                    Text(progressLabel(progress))
+                    Text("\(progress.status) — \(Int((progress.percent * 100).rounded()))%")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
             }
         }
-    }
-
-    private func progressLabel(_ p: ModelDownloader.Progress) -> String {
-        if p.bytesTotal > 0 {
-            let pct = Int((p.percent * 100).rounded())
-            return "\(p.status) — \(pct)% (\(formatBytes(p.bytesCompleted))/\(formatBytes(p.bytesTotal)))"
-        }
-        return p.status
-    }
-
-    private func formatBytes(_ bytes: Int64) -> String {
-        let f = ByteCountFormatter()
-        f.allowedUnits = [.useMB, .useGB]
-        f.countStyle = .file
-        return f.string(fromByteCount: bytes)
     }
 }

@@ -13,8 +13,8 @@ enum BackendStatus {
     case unreachable
 }
 
-/// Everything `BackendStatusView` needs to render a backend, so the view itself carries no
-/// backend-specific knowledge and can be reused as backends are added.
+/// A backend's reachability, for anything that wants to report it (currently just the
+/// `.status == .unreachable` banner in `DeviceListView`).
 @MainActor
 protocol BackendStatusReporting: ObservableObject {
     var status: BackendStatus { get }
