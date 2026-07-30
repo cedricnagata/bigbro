@@ -38,26 +38,10 @@ private struct GeneralSettingsTab: View {
 
     var body: some View {
         Form {
-            Section {
-                Label(
-                    "Connected apps name the model they want on every request — BigBro has no default to fall back on. A request naming a model that isn't downloaded starts the download and says so; one naming a model BigBro doesn't have fails rather than quietly answering from another.",
-                    systemImage: "info.circle"
-                )
-                .foregroundStyle(.secondary)
-                .font(.caption)
-            }
-
             Section(isExpanded: $languageExpanded) {
                 ForEach(ModelCatalog.language) { model in
                     ModelRow(model: model)
                 }
-
-                Label(
-                    "Models differ in what they can do — the badges say which. Tools and reasoning are quietly dropped for a model that lacks them, so a device asking for either gets an answer without them rather than an error.",
-                    systemImage: "info.circle"
-                )
-                .foregroundStyle(.secondary)
-                .font(.caption)
             } header: {
                 SectionHeader(title: "Language models", subtitle: summary(for: ModelCatalog.language))
             }
@@ -72,26 +56,12 @@ private struct GeneralSettingsTab: View {
 
             Section(isExpanded: $ttsExpanded) {
                 VoiceModelRow(kind: .tts)
-
-                Label(
-                    "Kokoro, on-device via FluidAudio. Voice (e.g. `af_heart`, `am_adam`, `bf_emma`) is chosen per request by the connecting app, not configured here.",
-                    systemImage: "info.circle"
-                )
-                .foregroundStyle(.secondary)
-                .font(.caption)
             } header: {
                 SectionHeader(title: "TTS models", subtitle: summary(for: .tts))
             }
 
             Section(isExpanded: $sttExpanded) {
                 VoiceModelRow(kind: .stt)
-
-                Label(
-                    "Parakeet, on-device via FluidAudio.",
-                    systemImage: "info.circle"
-                )
-                .foregroundStyle(.secondary)
-                .font(.caption)
             } header: {
                 SectionHeader(title: "STT models", subtitle: summary(for: .stt))
             }
