@@ -8,7 +8,16 @@ struct SettingsView: View {
             DevicesSettingsTab()
                 .tabItem { Label("Devices", systemImage: "iphone") }
         }
-        .frame(width: 480)
+        // Sized for the General tab, which is the crowded one: fifteen model rows, each with
+        // a name, size, capability badges, status line and up to two buttons. At the old
+        // 480pt the buttons wrapped under the badges and every row needed two lines.
+        //
+        // `ideal` rather than a fixed `width`/`height`, so the window opens roomy but stays
+        // resizable; `min` stops it being dragged narrow enough to wrap the rows again.
+        .frame(
+            minWidth: 620, idealWidth: 780,
+            minHeight: 480, idealHeight: 680
+        )
         .padding()
     }
 }
@@ -17,7 +26,14 @@ struct SettingsView: View {
 
 private struct GeneralSettingsTab: View {
     @ObservedObject private var settings = AppSettings.shared
+    @EnvironmentObject private var mlxEngine: MLXEngine
     @StateObject private var preview = SpeechPreview()
+
+    // Persisted rather than @State: which sections you care about is a stable preference, and
+    // re-collapsing eleven language models on every launch would be its own annoyance. Both
+    // open by default — nothing is hidden until the user decides to hide it.
+    @AppStorage("bigbro.settings.languageExpanded") private var languageExpanded = true
+    @AppStorage("bigbro.settings.visionExpanded") private var visionExpanded = true
 
     var body: some View {
         Form {
@@ -43,27 +59,27 @@ private struct GeneralSettingsTab: View {
                 .font(.caption)
             }
 
-            Section {
+            Section(isExpanded: $languageExpanded) {
                 ForEach(ModelCatalog.language) { model in
                     ModelRow(model: model)
                 }
-            } header: {
-                Text("Language models")
-            } footer: {
+
                 Label(
                     "Models differ in what they can do — the badges say which. Tools and reasoning are quietly dropped for a model that lacks them, so a device asking for either gets an answer without them rather than an error.",
                     systemImage: "info.circle"
                 )
                 .foregroundStyle(.secondary)
                 .font(.caption)
+            } header: {
+                SectionHeader(title: "Language models", subtitle: summary(for: ModelCatalog.language))
             }
 
-            Section {
+            Section(isExpanded: $visionExpanded) {
                 ForEach(ModelCatalog.vision) { model in
                     ModelRow(model: model)
                 }
             } header: {
-                Text("Vision models")
+                SectionHeader(title: "Vision models", subtitle: summary(for: ModelCatalog.vision))
             }
 
             Section {
@@ -111,6 +127,32 @@ private struct GeneralSettingsTab: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// One line of state for a collapsed section, so folding it away doesn't also hide whether
+    /// anything in it is running.
+    private func summary(for models: [BigBroModel]) -> String {
+        let running = models.filter { mlxEngine.isRunning($0.id) }.count
+        let downloaded = models.filter { mlxEngine.isDownloaded($0.id) }.count
+        if downloaded == 0 { return "none downloaded" }
+        if running == 0 { return "\(downloaded) downloaded" }
+        return "\(downloaded) downloaded, \(running) running"
+    }
+}
+
+/// A section title with a state summary beside it. The disclosure control comes from
+/// `Section(isExpanded:)` itself, so there is deliberately no chevron here to duplicate it.
+private struct SectionHeader: View {
+    let title: String
+    let subtitle: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(title)
+            Text("· \(subtitle)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 }
 
@@ -239,7 +281,7 @@ private struct ModelRow: View {
 
     private func icon(for state: MLXEngine.ModelRunState) -> String {
         switch state {
-        case .notDownloaded:            return "arrow.down.circle.dotted"
+        case .notDownloaded:            return "circle.dotted"
         case .downloading, .starting:   return "arrow.down.circle"
         case .downloaded:               return "internaldrive"
         case .running:                  return "bolt.circle.fill"
@@ -271,8 +313,10 @@ private struct CapabilityBadges: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            badge("Tools", "wrench.and.screwdriver", on: model.supportsTools)
-            badge("Images", "photo", on: model.supportsImages)
+            badge(model.supportsTools ? "Tools" : "No tools",
+                  "wrench.and.screwdriver", on: model.supportsTools)
+            badge(model.supportsImages ? "Images" : "Text only",
+                  "photo", on: model.supportsImages)
             badge(reasoningLabel, "brain", on: model.reasoning.producesTrace)
         }
     }
@@ -285,15 +329,22 @@ private struct CapabilityBadges: View {
         }
     }
 
+    /// The same symbol either way, with the label carrying the negation.
+    ///
+    /// An earlier version derived an "off" symbol by appending `.badge.ellipsis` to the base
+    /// name. That is not a real variant of most symbols — `photo.badge.ellipsis` and
+    /// `wrench.and.screwdriver.badge.ellipsis` don't exist — and a missing symbol logs and
+    /// renders as blank rather than failing the build. Only names written out in full are used
+    /// here now.
     private func badge(_ text: String, _ icon: String, on: Bool) -> some View {
-        Label(text, systemImage: on ? icon : "\(icon).badge.ellipsis")
+        Label(text, systemImage: icon)
             .font(.caption2)
             .padding(.horizontal, 5)
             .padding(.vertical, 1)
             .background(on ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.1))
             .foregroundStyle(on ? Color.primary : Color.secondary)
             .clipShape(Capsule())
-            .opacity(on ? 1 : 0.65)
+            .opacity(on ? 1 : 0.6)
     }
 }
 
