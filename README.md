@@ -18,13 +18,14 @@ install or run separately. Your Mac downloads the models itself, on first use or
 ## Requirements
 
 - macOS 14 Sonoma or later, Apple Silicon
-- Enough RAM for the models you run — the default pair (gpt-oss-20b MXFP4 at ~12 GB plus a ~2 GB vision model) wants ~16 GB; the smaller Llama and Gemma models need far less
+- Enough RAM for the models you run — a large pairing (gpt-oss-20b MXFP4 at ~12 GB plus a ~2 GB vision model) wants ~16 GB; the smaller Llama and Gemma models need far less
 - Nothing else — no separate server to install or keep running
 
 ## Models
 
 BigBro can download and run any model in its catalog — a curated subset of `mlx-swift-lm`'s
-registries. Defaults are set in Settings; a client can also name a model per request.
+registries. **Every request names its own model.** There is no default: BigBro answers with the
+model it was asked for or fails, so a client can never be silently served by a different one.
 
 | Model | Tools | Reasoning | Size |
 |---|---|---|---|
@@ -80,7 +81,7 @@ devices, the models declared by their app, each resolved to the catalog entry th
 Open **Settings** (⌘,) for two tabs:
 
 **General**
-- **Defaults** — which model answers when a device doesn't name one, for text and for vision
+- A note that connected apps name their own model on every request — there is nothing to configure here, because BigBro has no default
 - **Language models** / **Vision models** — one row per catalog model showing capability badges
   (tools, images, reasoning), size, and lifecycle state: not downloaded / downloading (%) /
   downloaded / starting / running, with **Download**, **Run**, **Stop** and **Remove** buttons
@@ -119,27 +120,29 @@ existing BigBroKit clients work against this branch without a rebuild.
 | Type | Fields | Description |
 |---|---|---|
 | `hello` | `deviceId`, `deviceName`, `appName`, `requiredModels?` | Initiate pairing |
-| `request` | `requestId`, `messages`, `streaming`, `tools?`, `model?`, `options?`, `think?`, `reasoning_effort?` | Chat request |
-| `generateRequest` | `requestId`, `prompt`, `streaming`, `images?`, `system?`, `model?`, `options?`, `think?`, `reasoning_effort?` | Single-turn generate |
+| `request` | `requestId`, `messages`, `streaming`, `model`, `tools?`, `options?`, `think?`, `reasoning_effort?` | Chat request |
+| `generateRequest` | `requestId`, `prompt`, `streaming`, `model`, `images?`, `system?`, `options?`, `think?`, `reasoning_effort?` | Single-turn generate |
 | `speechRequest` | `requestId`, `input`, `voice?`, `speed?` | Text-to-speech |
 | `transcribeRequest` | `requestId`, `audio` (base64), `audioFormat?` | Speech-to-text. Max 10 MB decoded |
-| `run` | `requestId`, `model?` (a catalog id, or `"text"` / `"vision"` / `"tts"` / `"stt"` / `"speech"`, default `"text"`) | Starts a model — puts its weights in memory — without generating anything |
-| `stop` | `requestId`, `model?` (a catalog id, or `"text"` / `"vision"`, default `"text"`) | Unloads a model from memory, keeping the download |
+| `run` | `requestId`, `model` (a catalog id, or `"tts"` / `"stt"` / `"speech"`) | Starts a model — puts its weights in memory — without generating anything |
+| `stop` | `requestId`, `model` (a catalog id) | Unloads a model from memory, keeping the download |
 | `bye` | — | Clean disconnect |
 
-`model` names a catalog entry (see below). Absent or unrecognized, the Mac's configured
-default is used. Images override it either way: a language model has no vision tower, so a
-request carrying images always runs on the vision model, substituting one if necessary.
+`model` names a catalog entry (see below) and is **required** — BigBro has no default to fall
+back on. A request that names no model, or names one BigBro doesn't have, comes back as an
+`error` rather than being answered by something else. A request carrying images must name a
+vision model for the same reason: a language model has no vision tower, and with nothing
+configured to substitute, answering from the text alone would be a silent wrong answer.
 
 `format` (JSON-schema-constrained output) and `keep_alive` are accepted for wire compatibility
 but currently have no effect — loaded models stay resident regardless of idle time.
 
 ### Models
 
-Any model in `ModelCatalog` can be downloaded and run, picked per request or set as a default
-in Settings. The catalog is a curated subset of mlx-swift-lm's registries rather than all of
-it, because each entry carries three hand-verified facts that cannot be derived from the
-registry — and a wrong value corrupts responses rather than failing:
+Any model in `ModelCatalog` can be downloaded and run, and every request picks one by name. The
+catalog is a curated subset of mlx-swift-lm's registries rather than all of it, because each
+entry carries three hand-verified facts that cannot be derived from the registry — and a wrong
+value corrupts responses rather than failing:
 
 | Fact | Why it can't be guessed |
 |---|---|
@@ -151,15 +154,19 @@ Adding a model means adding an entry and checking those three fields.
 
 ### Capability mismatches
 
-A request can ask for more than the chosen model can do. Rather than refusing, BigBro adapts
-and says what it did — a refusal would be worse, since the model can usually still answer:
+A request can ask for more than the chosen model can do. Where the model can still answer
+usefully, BigBro adapts and says what it dropped — refusing would be worse:
 
 - **Tools** on a model without them are removed before templating. Passing them anyway either
   throws in the template or drops them silently, and neither tells the caller anything.
 - **`reasoning_effort`** on a non-harmony model is dropped. Jinja ignores unknown variables, so
   left in it would look like it worked while doing nothing.
-- **Images** on a language model substitute the vision model. Answering from the text alone
-  would be worse than switching, since the image never reaches the prompt at all.
+
+**Images** on a language model are the exception: that one fails. The image never reaches the
+prompt at all, so there is no useful answer to adapt down to — only an answer from the text
+alone, which reads as if the model looked. BigBro used to substitute its configured vision
+model here; with no defaults there is nothing to substitute, and the client is told to name a
+vision model instead.
 
 Each of these sends a `modelCapabilities` message before the answer, carrying the model's real
 capabilities and a human-readable note per adaptation. BigBroKit exposes it as
@@ -280,7 +287,6 @@ Required entitlements (already configured in the project):
 bigbro/
 ├── App/
 │   ├── bigbroApp.swift         — app entry, AppModel, AppRouter
-│   ├── AppSettings.swift       — default model ids (UserDefaults)
 │   ├── BackendStatus.swift     — BackendStatus enum, BackendStatusReporting protocol
 │   ├── ModelInstalling.swift   — install protocol (ModelInstallProgress)
 │   ├── ModelDownloader.swift   — coordinates installs, publishes throttled progress
@@ -299,5 +305,5 @@ bigbro/
 │   └── PowerAssertion.swift    — keeps the Mac awake while peers are connected
 └── UI/
     ├── DeviceListView.swift     — menu bar device list with model status
-    └── SettingsView.swift       — settings tabs (model defaults + catalog, TTS/STT models, devices)
+    └── SettingsView.swift       — settings tabs (model catalog, TTS/STT models, devices)
 ```

@@ -223,14 +223,6 @@ enum ModelCatalog {
         ),
     ]
 
-    // MARK: - Defaults
-
-    static let defaultTextModelID = "gpt-oss-20b"
-    static let defaultVisionModelID = "qwen2.5-vl-3b"
-
-    static var defaultText: BigBroModel { model(id: defaultTextModelID) ?? language[0] }
-    static var defaultVision: BigBroModel { model(id: defaultVisionModelID) ?? vision[0] }
-
     // MARK: - Lookup
 
     static func model(id: String) -> BigBroModel? {
@@ -241,9 +233,10 @@ enum ModelCatalog {
     ///
     /// Exact id first. Failing that, a loose match, because clients predate this catalog and
     /// send Ollama-style tags — `gpt-oss:20b` for `gpt-oss-20b`, `qwen3-vl:30b` for a Qwen VL
-    /// model. Returns nil for a name that matches nothing, which callers turn into "use the
-    /// configured default" rather than an error: a client naming a model this Mac has never
-    /// heard of should still get an answer.
+    /// model. Returns nil for a name that matches nothing, which callers report back as an
+    /// error: BigBro has no default to fall back to, and answering a request for a model this
+    /// Mac has never heard of with some *other* model would be a silent substitution the
+    /// client could not detect.
     static func resolve(_ name: String) -> BigBroModel? {
         let normalized = normalize(name)
         if let exact = all.first(where: { normalize($0.id) == normalized }) { return exact }

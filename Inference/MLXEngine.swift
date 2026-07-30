@@ -15,6 +15,8 @@ enum InferenceError: Error, LocalizedError {
     case invalidImage(messageIndex: Int)
     case generationFailed(String)
     case unknownModel(String)
+    case modelNotSpecified
+    case modelCannotSeeImages(String)
 
     var errorDescription: String? {
         switch self {
@@ -24,6 +26,10 @@ enum InferenceError: Error, LocalizedError {
             return message
         case .unknownModel(let name):
             return "'\(name)' is not a model BigBro knows about."
+        case .modelNotSpecified:
+            return "No model was named. BigBro has no default — every request must name the model it wants."
+        case .modelCannotSeeImages(let name):
+            return "\(name) cannot see images. Name a vision model for requests that carry them."
         }
     }
 }
@@ -40,14 +46,15 @@ enum InferenceEvent {
 /// What was actually done with a request, once the model's capabilities were taken into
 /// account. Reported alongside the stream so `AppRouter` can tell the client what it did not
 /// get, rather than leaving it to infer from an answer that quietly ignored half the request.
+///
+/// Only ever describes capabilities that were *dropped* — never a model that was swapped.
+/// BigBro runs the model it was asked for or fails; there is no substitution to report.
 struct ResolvedRequest: Sendable {
     let model: BigBroModel
     /// True when tools were dropped because the model cannot call them.
     let droppedTools: Bool
     /// True when a `reasoning_effort` was dropped because the model has no effort control.
     let droppedReasoningEffort: Bool
-    /// Set when images forced a different model than the one asked for.
-    let substitutedForImages: Bool
 }
 
 /// Runs MLX models in-process, replacing the Ollama/LocalAI OpenAI-compatible proxy.
@@ -83,17 +90,6 @@ final class MLXEngine: ObservableObject, BackendStatusReporting {
         // pressure; nothing like that applies here, and resident models benefit from MLX
         // being able to actually cache buffers between requests.
         MLX.Memory.cacheLimit = 512 * 1024 * 1024
-    }
-
-    // MARK: - Selection
-
-    /// The model used when a request names none, or names one this Mac does not have.
-    var defaultTextModel: BigBroModel {
-        ModelCatalog.model(id: AppSettings.shared.textModelID) ?? ModelCatalog.defaultText
-    }
-
-    var defaultVisionModel: BigBroModel {
-        ModelCatalog.model(id: AppSettings.shared.visionModelID) ?? ModelCatalog.defaultVision
     }
 
     // MARK: - BackendStatusReporting
@@ -384,32 +380,40 @@ final class MLXEngine: ObservableObject, BackendStatusReporting {
 
     // MARK: - Routing
 
-    /// Picks the model for a request, honouring what the client asked for where possible.
+    /// Resolves the model a request named, or fails.
     ///
-    /// Images override the request's model choice. A language model handed an image cannot
-    /// describe it — it has no vision tower and the image never reaches the prompt — so
-    /// silently answering from the text alone would be worse than substituting a model that
-    /// can actually see, which is what happens here.
+    /// Every request names its own model — BigBro keeps no default to fall back on. That is
+    /// deliberate: a fallback turns "the client asked for something this Mac doesn't have" into
+    /// an ordinary-looking answer from a different model, which the client has no way to
+    /// detect. Failing makes the disagreement visible at the one moment it can still be fixed.
+    ///
+    /// Images are checked against the named model rather than routed around it, for the same
+    /// reason. A language model handed an image cannot describe it — it has no vision tower and
+    /// the image never reaches the prompt — and with no configured vision model there is
+    /// nothing to substitute, so this is an error rather than a silent answer from the text
+    /// alone.
     func resolve(
         requestedModel name: String?,
         messages: [[String: Any]],
         toolCount: Int = 0,
         reasoningEffort: String? = nil
-    ) -> ResolvedRequest {
-        let hasImages = messages.contains { ($0["images"] as? [String])?.isEmpty == false }
-        let requested = name.flatMap { $0.isEmpty ? nil : ModelCatalog.resolve($0) }
-
-        var model = requested ?? (hasImages ? defaultVisionModel : defaultTextModel)
-        var substituted = false
-        if hasImages && !model.supportsImages {
-            model = defaultVisionModel
-            substituted = true
+    ) throws -> ResolvedRequest {
+        guard let name, !name.isEmpty else {
+            throw InferenceError.modelNotSpecified
         }
+        guard let model = ModelCatalog.resolve(name) else {
+            throw InferenceError.unknownModel(name)
+        }
+
+        let hasImages = messages.contains { ($0["images"] as? [String])?.isEmpty == false }
+        if hasImages && !model.supportsImages {
+            throw InferenceError.modelCannotSeeImages(model.displayName)
+        }
+
         return ResolvedRequest(
             model: model,
             droppedTools: toolCount > 0 && !model.supportsTools,
-            droppedReasoningEffort: reasoningEffort != nil && !model.reasoning.acceptsEffort,
-            substitutedForImages: substituted
+            droppedReasoningEffort: reasoningEffort != nil && !model.reasoning.acceptsEffort
         )
     }
 

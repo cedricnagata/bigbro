@@ -25,7 +25,6 @@ struct SettingsView: View {
 // MARK: - General
 
 private struct GeneralSettingsTab: View {
-    @ObservedObject private var settings = AppSettings.shared
     @EnvironmentObject private var mlxEngine: MLXEngine
     @EnvironmentObject private var speechEngine: SpeechEngine
 
@@ -40,21 +39,8 @@ private struct GeneralSettingsTab: View {
     var body: some View {
         Form {
             Section {
-                Picker("Text model", selection: $settings.textModelID) {
-                    ForEach(ModelCatalog.language) { model in
-                        Text(model.displayName).tag(model.id)
-                    }
-                }
-                Picker("Vision model", selection: $settings.visionModelID) {
-                    ForEach(ModelCatalog.vision) { model in
-                        Text(model.displayName).tag(model.id)
-                    }
-                }
-            } header: {
-                Text("Defaults")
-            } footer: {
                 Label(
-                    "Used when a device doesn't name a model. Requests with images always use the vision model, whichever one was asked for.",
+                    "Connected apps name the model they want on every request — BigBro has no default to fall back on. A request naming a model that isn't downloaded starts the download and says so; one naming a model BigBro doesn't have fails rather than quietly answering from another.",
                     systemImage: "info.circle"
                 )
                 .foregroundStyle(.secondary)

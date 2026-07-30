@@ -232,9 +232,6 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         if resolved.droppedReasoningEffort {
             notes.append("\(resolved.model.displayName) has no reasoning effort control — the setting was ignored.")
         }
-        if resolved.substitutedForImages {
-            notes.append("Switched to \(resolved.model.displayName) because the request included images.")
-        }
         guard !notes.isEmpty else { return }
 
         print("[AppRouter] \(requestId.prefix(8)) capability notes: \(notes.joined(separator: " "))")
@@ -353,9 +350,15 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         // the fact.
         let reasoningEffort = resolveReasoningEffort(message, sendReasoning: sendReasoning)
 
-        let resolved = await MainActor.run {
-            mlxEngine.resolve(requestedModel: message["model"] as? String, messages: messagesRaw,
-                              toolCount: tools.count, reasoningEffort: reasoningEffort)
+        let resolved: ResolvedRequest
+        do {
+            resolved = try await MainActor.run {
+                try mlxEngine.resolve(requestedModel: message["model"] as? String, messages: messagesRaw,
+                                      toolCount: tools.count, reasoningEffort: reasoningEffort)
+            }
+        } catch {
+            await fail(requestId, error.localizedDescription, deviceId: deviceId, server: server)
+            return
         }
         print("[AppRouter] handleRequest: requestId=\(requestId.prefix(8)) model=\(resolved.model.id) tools=\(tools.count) messages=\(messagesRaw.count) think=\(sendReasoning) effort=\(reasoningEffort ?? "default")")
 
@@ -397,9 +400,15 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         if !images.isEmpty { user["images"] = images }
         messagesRaw.append(user)
 
-        let resolved = await MainActor.run {
-            mlxEngine.resolve(requestedModel: message["model"] as? String, messages: messagesRaw,
-                              reasoningEffort: reasoningEffort)
+        let resolved: ResolvedRequest
+        do {
+            resolved = try await MainActor.run {
+                try mlxEngine.resolve(requestedModel: message["model"] as? String, messages: messagesRaw,
+                                      reasoningEffort: reasoningEffort)
+            }
+        } catch {
+            await fail(requestId, error.localizedDescription, deviceId: deviceId, server: server)
+            return
         }
         guard await ensureModelReady(resolved.model, requestId: requestId, deviceId: deviceId, server: server) else { return }
         await reportCapabilityGaps(resolved, requestId: requestId, deviceId: deviceId, server: server)
@@ -415,19 +424,29 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
         await drain(stream, requestId: requestId, deviceId: deviceId, server: server, label: "Generate", sendReasoning: sendReasoning)
     }
 
-    /// Resolves the `model` field of a `run`/`stop` message.
+    /// Resolves the `model` field of a `run`/`stop` message to a catalog entry, or reports why
+    /// it could not.
     ///
-    /// `text` and `vision` are capability words, not model names — they mean "whichever model
-    /// is configured for this". Anything else is a catalog id, so a client can start the
-    /// specific model it is about to ask for.
-    private func requestedModel(_ requested: String) async -> BigBroModel {
-        await MainActor.run {
-            switch requested {
-            case "text":   return mlxEngine.defaultTextModel
-            case "vision": return mlxEngine.defaultVisionModel
-            default:       return ModelCatalog.resolve(requested) ?? mlxEngine.defaultTextModel
-            }
+    /// There are no capability words like `text` or `vision` any more — those meant "whichever
+    /// model is configured for this", and nothing is configured. A `run`/`stop` names the exact
+    /// model it means, the same as a request does.
+    private func requestedModel(
+        _ requested: String?,
+        requestId: String,
+        deviceId: String,
+        server: PeerServer
+    ) async -> BigBroModel? {
+        guard let requested, !requested.isEmpty else {
+            await fail(requestId, InferenceError.modelNotSpecified.localizedDescription,
+                       deviceId: deviceId, server: server)
+            return nil
         }
+        guard let model = await MainActor.run(body: { ModelCatalog.resolve(requested) }) else {
+            await fail(requestId, InferenceError.unknownModel(requested).localizedDescription,
+                       deviceId: deviceId, server: server)
+            return nil
+        }
+        return model
     }
 
     /// Starts a model — materializes its weights into memory — without generating anything,
@@ -441,18 +460,18 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
             print("[AppRouter] handleRunRequest: missing requestId")
             return
         }
-        let requested = (message["model"] as? String)?.lowercased() ?? "text"
+        let requested = (message["model"] as? String)?.lowercased()
 
-        // Speech runs through its own engine. The Mac already loads Kokoro and Parakeet at
-        // launch when speech is enabled, so this is usually a no-op — but a client that
-        // connects while that is still in flight needs somewhere to *wait*, which matters for
-        // a voice loop: without it the first utterance eats the whole cold load.
-        if let speechKinds = Self.speechKinds(for: requested) {
+        // Speech runs through its own engine. Kokoro and Parakeet load lazily on first use, so
+        // this is what gives a client somewhere to *wait* — which matters for a voice loop,
+        // where a cold load would otherwise eat the first utterance.
+        if let requested, let speechKinds = Self.speechKinds(for: requested) {
             await preloadSpeech(speechKinds, requestId: requestId, deviceId: deviceId, server: server)
             return
         }
 
-        let model = await requestedModel(requested)
+        guard let model = await requestedModel(requested, requestId: requestId,
+                                               deviceId: deviceId, server: server) else { return }
 
         print("[AppRouter] run requested by \(deviceId.prefix(8)) for \(model.displayName)")
         guard await ensureModelReady(model, requestId: requestId, deviceId: deviceId, server: server) else { return }
@@ -481,16 +500,17 @@ final class AppRouter: PeerServerDelegate, @unchecked Sendable {
             print("[AppRouter] handleStopRequest: missing requestId")
             return
         }
-        let requested = (message["model"] as? String)?.lowercased() ?? "text"
+        let requested = (message["model"] as? String)?.lowercased()
 
-        if Self.speechKinds(for: requested) != nil {
+        if let requested, Self.speechKinds(for: requested) != nil {
             // Speech models are shared by every paired device and reload slowly; letting one
             // client evict them for everyone is not a trade worth offering.
             await fail(requestId, "Speech models cannot be stopped remotely.", deviceId: deviceId, server: server)
             return
         }
 
-        let model = await requestedModel(requested)
+        guard let model = await requestedModel(requested, requestId: requestId,
+                                               deviceId: deviceId, server: server) else { return }
         await MainActor.run { mlxEngine.stop(model.id) }
         print("[AppRouter] stopped \(model.displayName) for \(deviceId.prefix(8))")
         await server.send(["type": "done", "requestId": requestId], to: deviceId)
