@@ -1,5 +1,140 @@
 import Foundation
 
+/// Turns a model's raw token stream back into the three things `AppRouter` forwards.
+///
+/// Necessary because models disagree about how to mark up a response, and `MLXLMCommon`
+/// hands over whatever the tokenizer decoded without interpreting it. gpt-oss writes harmony
+/// channel markers, Qwen3 writes `<think>` tags, Gemma and Llama write the answer and nothing
+/// else. One parser cannot serve all three: running the harmony parser over plain output
+/// withholds the opening of every reply while it waits for framing that never comes.
+protocol ResponseParser: AnyObject {
+    /// Feed newly-decoded text. Returns whatever became complete.
+    func feed(_ text: String) -> [ParsedResponseEvent]
+    /// Call once generation ends. Flushes anything still buffered.
+    func finish() -> [ParsedResponseEvent]
+}
+
+enum ParsedResponseEvent {
+    case reasoning(String)
+    case delta(String)
+    case toolCall(name: String, argumentsJSON: String)
+}
+
+extension ReasoningStyle {
+    /// The parser this style needs. The pairing is fixed — a model's reasoning style *is* its
+    /// output framing.
+    func makeParser() -> ResponseParser {
+        switch self {
+        case .harmony:      return HarmonyStreamParser()
+        case .thinkTags:    return ThinkTagParser()
+        case .none:         return PlainTextParser()
+        }
+    }
+}
+
+// MARK: - Plain
+
+/// Pass-through, for models with no reasoning phase and no channel markup.
+///
+/// Not merely a simplification — it is the correct behaviour. Everything the model emits is
+/// the answer, so buffering any of it only delays the first token, which for a spoken reply
+/// delays the first audible word.
+final class PlainTextParser: ResponseParser {
+    func feed(_ text: String) -> [ParsedResponseEvent] {
+        text.isEmpty ? [] : [.delta(text)]
+    }
+
+    func finish() -> [ParsedResponseEvent] { [] }
+}
+
+// MARK: - Think tags
+
+/// Splits a leading `<think>…</think>` block off the answer. Qwen3, DeepSeek-R1 distills.
+///
+/// Text inside the tags is streamed as `.reasoning` and text after them as `.delta`, both
+/// incrementally — neither is held back waiting for a close tag, since the client renders
+/// both as they arrive.
+final class ThinkTagParser: ResponseParser {
+    private static let openTag = "<think>"
+    private static let closeTag = "</think>"
+
+    private var buffer = ""
+    private var insideThink = false
+    /// Once the think block has closed, tag scanning stops: a later literal `<think>` in prose
+    /// is content, not markup.
+    private var thinkFinished = false
+
+    func feed(_ text: String) -> [ParsedResponseEvent] {
+        buffer += text
+        return drain(isFinal: false)
+    }
+
+    func finish() -> [ParsedResponseEvent] {
+        var events = drain(isFinal: true)
+        if !buffer.isEmpty {
+            events.append(insideThink ? .reasoning(buffer) : .delta(buffer))
+            buffer = ""
+        }
+        return events
+    }
+
+    private func drain(isFinal: Bool) -> [ParsedResponseEvent] {
+        var events: [ParsedResponseEvent] = []
+
+        while !buffer.isEmpty {
+            let tag = insideThink ? Self.closeTag : Self.openTag
+
+            if thinkFinished {
+                events.append(.delta(buffer))
+                buffer = ""
+                break
+            }
+
+            if let range = buffer.range(of: tag) {
+                let before = String(buffer[buffer.startIndex..<range.lowerBound])
+                if !before.isEmpty {
+                    events.append(insideThink ? .reasoning(before) : .delta(before))
+                }
+                buffer.removeSubrange(buffer.startIndex..<range.upperBound)
+                if insideThink {
+                    insideThink = false
+                    thinkFinished = true
+                } else {
+                    insideThink = true
+                }
+                continue
+            }
+
+            // No tag in view. Emit everything that cannot be the start of one, and keep the
+            // tail — a tag can straddle two chunks, and splitting it would leak `<thi` into
+            // the answer and then fail to recognize the tag at all.
+            let keep = Self.longestSuffixThatCouldStart(tag, in: buffer)
+            let emitCount = buffer.count - keep
+            if emitCount > 0 {
+                let emitted = String(buffer.prefix(emitCount))
+                events.append(insideThink ? .reasoning(emitted) : .delta(emitted))
+                buffer.removeFirst(emitCount)
+            }
+            if isFinal { break }
+            return events
+        }
+
+        return events
+    }
+
+    /// Length of the longest suffix of `text` that is a prefix of `tag`.
+    private static func longestSuffixThatCouldStart(_ tag: String, in text: String) -> Int {
+        let maxOverlap = min(tag.count - 1, text.count)
+        guard maxOverlap > 0 else { return 0 }
+        for length in stride(from: maxOverlap, through: 1, by: -1) {
+            if tag.hasPrefix(text.suffix(length)) { return length }
+        }
+        return 0
+    }
+}
+
+// MARK: - Harmony
+
 /// Incrementally splits gpt-oss's harmony response format out of a raw text stream.
 ///
 /// gpt-oss (like every OpenAI "harmony" model) writes its output as a sequence of channel
@@ -14,7 +149,7 @@ import Foundation
 /// gpt-oss either (`infer()` returns nil for it), and `GPTOSSModel` itself is pure
 /// transformer math with no channel logic. So the channel markers arrive as literal text in
 /// `Generation.chunk`, same as any other token, and this type is what turns them back into
-/// the three things `AppRouter` actually forwards: `.reasoning`, `.delta`, `.toolCalls`.
+/// the three things `AppRouter` actually forwards: `.reasoning`, `.delta`, `.toolCall`.
 ///
 /// This is the harmony hand-parser the design flagged as the highest-risk, most-likely-to-
 /// change piece of the whole port: it depends on gpt-oss's special tokens surviving
@@ -22,12 +157,7 @@ import Foundation
 /// `.chunk` is emitted, this parser sees no `<|channel|>` markers at all and falls back to
 /// treating everything as plain final-channel text (see `plainTextFallbackThreshold`) rather
 /// than silently swallowing the whole response.
-final class HarmonyStreamParser {
-    enum ParsedEvent {
-        case reasoning(String)
-        case delta(String)
-        case toolCall(name: String, argumentsJSON: String)
-    }
+final class HarmonyStreamParser: ResponseParser {
 
     enum Channel {
         case analysis
@@ -50,19 +180,17 @@ final class HarmonyStreamParser {
     private var abandonedHarmonyFraming = false
     private var toolCallCounter = 0
 
-    /// Feed newly-decoded text. Returns zero or more events extracted so far.
-    func feed(_ text: String) -> [ParsedEvent] {
+    func feed(_ text: String) -> [ParsedResponseEvent] {
         buffer += text
         return drain(isFinal: false)
     }
 
-    /// Call once generation ends. Flushes anything still buffered.
-    func finish() -> [ParsedEvent] {
+    func finish() -> [ParsedResponseEvent] {
         drain(isFinal: true)
     }
 
-    private func drain(isFinal: Bool) -> [ParsedEvent] {
-        var events: [ParsedEvent] = []
+    private func drain(isFinal: Bool) -> [ParsedResponseEvent] {
+        var events: [ParsedResponseEvent] = []
 
         if abandonedHarmonyFraming {
             if !buffer.isEmpty {

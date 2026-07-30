@@ -18,30 +18,37 @@ install or run separately. Your Mac downloads the models itself, on first use or
 ## Requirements
 
 - macOS 14 Sonoma or later, Apple Silicon
-- ~16 GB of RAM to keep both models resident (gpt-oss-20b MXFP4 is ~12 GB; the vision model is ~2 GB)
+- Enough RAM for the models you run — the default pair (gpt-oss-20b MXFP4 at ~12 GB plus a ~2 GB vision model) wants ~16 GB; the smaller Llama and Gemma models need far less
 - Nothing else — no separate server to install or keep running
 
 ## Models
 
-BigBro hosts exactly two fixed local models, routed automatically by request content:
+BigBro can download and run any model in its catalog — a curated subset of `mlx-swift-lm`'s
+registries. Defaults are set in Settings; a client can also name a model per request.
 
-| Model | Runs when… | Size |
-|---|---|---|
-| `gpt-oss-20b` (MXFP4, via `mlx-swift-lm`) | the request is text-only | ~12 GB |
-| `Qwen2.5-VL-3B-Instruct` (4-bit) | the request includes an image | ~2 GB |
+| Model | Tools | Reasoning | Size |
+|---|---|---|---|
+| gpt-oss 20B | ✓ | low / medium / high | ~12 GB |
+| Qwen3 8B / 4B | ✓ | on / off | ~4.7 / 2.4 GB |
+| Llama 3.1 8B, 3.2 3B, 3.2 1B | ✓ | — | ~4.5 / 1.8 / 0.7 GB |
+| Gemma 4 E4B / E2B, Gemma 3 1B | — | — | ~4.4 / 3.0 / 0.8 GB |
+| Phi 3.5 Mini | — | — | ~2.2 GB |
+| DeepSeek-R1 Distill 7B | — | always | ~4.2 GB |
+| Qwen2.5-VL 3B, Qwen3-VL 4B (vision) | — | — | ~2.0 / 2.5 GB |
+| Gemma 3 4B, Gemma 4 E2B (vision) | — | — | ~3.0 GB |
 
-There is no model picker: which model handles a request is decided by whether any message
-carries an image, not by the `model` name a client asks for. Legacy Ollama-style names
-(`gpt-oss:20b`, `qwen3-vl:30b`) still work for the missing-model handshake — they're mapped onto
-one of the two models by a simple heuristic ("does the name mention vision") rather than matched
-exactly, since BigBro no longer has models by those literal names.
+Models differ in what they support, and BigBro adapts rather than refusing — see
+[Capability mismatches](#capability-mismatches). Requests carrying images always run on the
+vision model regardless of what was asked for, since a language model has no vision tower.
 
-Both models can stay loaded in memory at once; loading one never evicts the other.
+Any number of models can stay resident at once; loading one never evicts another. Nothing is
+ever unloaded automatically, so a Mac that runs several large models holds them all.
 
-Tool calling runs through gpt-oss's [harmony response format](https://cookbook.openai.com/articles/openai-harmony) —
+Tool calling for gpt-oss runs through its [harmony response format](https://cookbook.openai.com/articles/openai-harmony) —
 BigBro parses the `analysis`/`final`/`commentary` channels out of the raw token stream itself,
 since neither `mlx-swift-lm`'s built-in tool-call parsers nor the `GPTOSSModel` implementation
-understand gpt-oss's channel format natively.
+understand gpt-oss's channel format natively. Other models use `mlx-swift-lm`'s own tool-call
+parsing and their own output framing (`<think>` tags, or none at all).
 
 ## Speech
 
@@ -59,22 +66,23 @@ Download the latest release from the [Releases](../../releases) page and move Bi
 ## Menu bar
 
 Click the BigBro icon to see each paired device with a live status indicator and, for connected
-devices, the required models declared by their app, mapped onto whichever local model satisfies
-them.
+devices, the models declared by their app, each resolved to the catalog entry that satisfies it.
 
 ## Settings
 
 Open **Settings** (⌘,) for two tabs:
 
 **General**
-- **Text** — one row per fixed text/vision model (gpt-oss-20b, Qwen2.5-VL-3B): not downloaded /
-  downloading (%) / loaded, with a **Download** button
+- **Defaults** — which model answers when a device doesn't name one, for text and for vision
+- **Language models** / **Vision models** — one row per catalog model showing capability badges
+  (tools, images, reasoning), size, and state: not downloaded / downloading (%) / loaded, with a
+  **Download** button
 - **Speech** — off by default; when enabled, shows one row per speech model (Kokoro, Parakeet)
   with its own download progress, plus a free-form Kokoro voice field (e.g. `af_heart`) and
   **Preview**
 
 **Devices** — paired device management:
-- Each connected device shows its required models, each mapped to the local model that satisfies it, with install status (✓ / ✗)
+- Each connected device shows its required models, each resolved to the catalog entry that satisfies it, with install status (✓ / ✗)
 - **Disconnect** — closes the current connection (device stays remembered, will auto-reconnect)
 - **Remove** — forgets the device entirely; it will need to re-pair with approval
 - **Refresh** — pings all live connections; dead ones flip to disconnected
@@ -84,7 +92,7 @@ Open **Settings** (⌘,) for two tabs:
 
 iOS apps built with BigBroKit can declare which models they require. On connect, BigBro:
 
-1. Reports missing models back to the iOS app in the `helloAck` response, mapped onto the local model each name refers to
+1. Reports missing models back to the iOS app in the `helloAck` response, resolved to the catalog entry each name refers to
 2. Shows a notification on the Mac listing any models that need to be downloaded
 3. Pushes live updates to connected devices as local models finish downloading
 
@@ -106,12 +114,50 @@ existing BigBroKit clients work against this branch without a rebuild.
 | `generateRequest` | `requestId`, `prompt`, `streaming`, `images?`, `system?`, `model?`, `options?`, `think?`, `reasoning_effort?` | Single-turn generate |
 | `speechRequest` | `requestId`, `input`, `voice?`, `speed?` | Text-to-speech |
 | `transcribeRequest` | `requestId`, `audio` (base64), `audioFormat?` | Speech-to-text. Max 10 MB decoded |
-| `preload` | `requestId`, `model?` (`"text"` / `"vision"` / `"tts"` / `"stt"` / `"speech"`, default `"text"`) | Loads a model into memory without generating anything — see below |
+| `preload` | `requestId`, `model?` (a catalog id, or `"text"` / `"vision"` / `"tts"` / `"stt"` / `"speech"`, default `"text"`) | Loads a model into memory without generating anything — see below |
 | `bye` | — | Clean disconnect |
 
-Routing is decided by request content (images present → vision model), not by the `model` field.
+`model` names a catalog entry (see below). Absent or unrecognized, the Mac's configured
+default is used. Images override it either way: a language model has no vision tower, so a
+request carrying images always runs on the vision model, substituting one if necessary.
+
 `format` (JSON-schema-constrained output) and `keep_alive` are accepted for wire compatibility
-but currently have no effect — both models stay resident regardless of idle time.
+but currently have no effect — loaded models stay resident regardless of idle time.
+
+### Models
+
+Any model in `ModelCatalog` can be downloaded and run, picked per request or set as a default
+in Settings. The catalog is a curated subset of mlx-swift-lm's registries rather than all of
+it, because each entry carries three hand-verified facts that cannot be derived from the
+registry — and a wrong value corrupts responses rather than failing:
+
+| Fact | Why it can't be guessed |
+|---|---|
+| Tool support | Whether the chat template has a tools slot at all. Gemma and Phi don't. |
+| Reasoning style | None (Gemma, Llama), harmony channels (gpt-oss), or `<think>` tags (Qwen3, DeepSeek-R1). |
+| Effort control | `reasoning_effort` is harmony-only; Qwen3's lever is `enable_thinking`, a different key. |
+
+Adding a model means adding an entry and checking those three fields.
+
+### Capability mismatches
+
+A request can ask for more than the chosen model can do. Rather than refusing, BigBro adapts
+and says what it did — a refusal would be worse, since the model can usually still answer:
+
+- **Tools** on a model without them are removed before templating. Passing them anyway either
+  throws in the template or drops them silently, and neither tells the caller anything.
+- **`reasoning_effort`** on a non-harmony model is dropped. Jinja ignores unknown variables, so
+  left in it would look like it worked while doing nothing.
+- **Images** on a language model substitute the vision model. Answering from the text alone
+  would be worse than switching, since the image never reaches the prompt at all.
+
+Each of these sends a `modelCapabilities` message before the answer, carrying the model's real
+capabilities and a human-readable note per adaptation. BigBroKit exposes it as
+`client.modelNotes`. Clients that predate the message ignore it.
+
+Output framing is chosen per model too. The harmony parser withholds text until it sees channel
+markers, so running it over a Gemma response would swallow the opening of every reply — each
+reasoning style gets its own parser (`ResponseParser`).
 
 ### Reasoning: `think` vs `reasoning_effort`
 
@@ -173,8 +219,9 @@ speaking and which is an intermediate tool step. BigBroKit packages the sequence
 | Type | Fields | Description |
 |---|---|---|
 | `helloAck` | `status` (`"approved"` / `"denied"`), `missingModels?` | Pairing result with missing model list |
-| `chunk` | `requestId`, `delta` | Assistant text delta (harmony `final` channel) |
-| `thinking` | `requestId`, `delta` | Reasoning delta (harmony `analysis` channel), kept separate from `chunk` so it is never spoken or shown as an answer |
+| `chunk` | `requestId`, `delta` | Assistant text delta |
+| `thinking` | `requestId`, `delta` | Reasoning delta, kept separate from `chunk` so it is never spoken or shown as an answer. Only from models that reason |
+| `modelCapabilities` | `requestId`, `model`, `supportsTools`, `supportsImages`, `supportsReasoning`, `supportsReasoningEffort`, `notes` | Sent before the answer when the chosen model couldn't do everything asked — see Capability mismatches |
 | `toolCall` | `requestId`, `calls` | Tool calls array (`request` only) |
 | `audioStart` | `requestId`, `format`, `sampleRate`, `channels`, `voice` | Precedes audio, so playback can be configured before the first chunk. Always `pcm`/24000/1 |
 | `audioChunk` | `requestId`, `audio` (base64), `seq` | Synthesized audio, ~8 KB per chunk |
@@ -199,13 +246,14 @@ Required entitlements (already configured in the project):
 bigbro/
 ├── App/
 │   ├── bigbroApp.swift         — app entry, AppModel, AppRouter
-│   ├── AppSettings.swift       — speech toggle + voice (UserDefaults)
+│   ├── AppSettings.swift       — default model ids, speech toggle + voice (UserDefaults)
 │   ├── BackendStatus.swift     — BackendStatus enum, BackendStatusReporting protocol
 │   ├── ModelInstalling.swift   — install protocol (ModelInstallProgress)
 │   └── ModelDownloader.swift   — coordinates installs, publishes throttled progress
 ├── Inference/
-│   ├── MLXEngine.swift         — loads/runs gpt-oss-20b + Qwen2.5-VL-3B via MLX, message translation
-│   ├── HarmonyParser.swift     — splits gpt-oss's harmony channels out of the raw token stream
+│   ├── ModelCatalog.swift      — the supported models and their hand-verified capabilities
+│   ├── MLXEngine.swift         — loads/runs catalog models via MLX, capability negotiation, message translation
+│   ├── ResponseParser.swift    — per-model output framing: harmony channels, <think> tags, or plain
 │   └── MLXInstaller.swift      — ModelInstalling conformer backed by MLXEngine.ensureLoaded
 ├── Speech/
 │   └── SpeechEngine.swift      — Kokoro TTS + Parakeet STT via FluidAudio
@@ -217,5 +265,5 @@ bigbro/
 └── UI/
     ├── DeviceListView.swift     — menu bar device list with model status
     ├── SpeechPreview.swift      — auditions a voice locally via AVAudioPlayer
-    └── SettingsView.swift       — settings tabs (text models, speech models, devices)
+    └── SettingsView.swift       — settings tabs (model defaults + catalog, speech models, devices)
 ```

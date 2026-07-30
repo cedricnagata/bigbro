@@ -22,18 +22,48 @@ private struct GeneralSettingsTab: View {
     var body: some View {
         Form {
             Section {
-                ForEach(MLXEngine.ModelKind.allCases, id: \.self) { kind in
-                    ModelRow(kind: kind)
+                Picker("Text model", selection: $settings.textModelID) {
+                    ForEach(ModelCatalog.language) { model in
+                        Text(model.displayName).tag(model.id)
+                    }
+                }
+                Picker("Vision model", selection: $settings.visionModelID) {
+                    ForEach(ModelCatalog.vision) { model in
+                        Text(model.displayName).tag(model.id)
+                    }
                 }
             } header: {
-                Text("Text")
+                Text("Defaults")
             } footer: {
                 Label(
-                    "gpt-oss-20b handles text and tool calls; Qwen2.5-VL-3B handles requests with images. Both run on this Mac — no separate server to install.",
+                    "Used when a device doesn't name a model. Requests with images always use the vision model, whichever one was asked for.",
                     systemImage: "info.circle"
                 )
                 .foregroundStyle(.secondary)
                 .font(.caption)
+            }
+
+            Section {
+                ForEach(ModelCatalog.language) { model in
+                    ModelRow(model: model)
+                }
+            } header: {
+                Text("Language models")
+            } footer: {
+                Label(
+                    "Models differ in what they can do — the badges say which. Tools and reasoning are quietly dropped for a model that lacks them, so a device asking for either gets an answer without them rather than an error.",
+                    systemImage: "info.circle"
+                )
+                .foregroundStyle(.secondary)
+                .font(.caption)
+            }
+
+            Section {
+                ForEach(ModelCatalog.vision) { model in
+                    ModelRow(model: model)
+                }
+            } header: {
+                Text("Vision models")
             }
 
             Section {
@@ -84,31 +114,42 @@ private struct GeneralSettingsTab: View {
     }
 }
 
-/// One row per fixed local model: its download/load state, and a button to fetch it.
+/// One row per catalog model: what it can do, its download/load state, and a button to fetch
+/// it.
+///
+/// The capability badges are the point of the row. Which model is selected changes whether
+/// tool calls and reasoning work at all, and that difference is invisible at request time —
+/// an unsupported tool is dropped, not refused — so it has to be legible here instead.
 private struct ModelRow: View {
     @EnvironmentObject var mlxEngine: MLXEngine
     @EnvironmentObject var modelDownloader: ModelDownloader
-    let kind: MLXEngine.ModelKind
+    let model: BigBroModel
 
     var body: some View {
-        let loaded = mlxEngine.isLoaded(kind)
-        let downloaded = mlxEngine.isDownloaded(kind)
-        let progress = modelDownloader.progress[kind.displayName]
+        let loaded = mlxEngine.isLoaded(model.id)
+        let downloaded = mlxEngine.isDownloaded(model.id)
+        let progress = modelDownloader.progress[model.id]
 
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
-                Image(systemName: loaded ? "checkmark.circle.fill" : (progress != nil ? "arrow.down.circle" : (downloaded ? "checkmark.circle" : "xmark.circle.fill")))
-                    .foregroundStyle(loaded ? .green : (progress != nil ? .blue : (downloaded ? .green : .red)))
-                Text(kind.displayName)
+                Image(systemName: loaded ? "checkmark.circle.fill" : (progress != nil ? "arrow.down.circle" : (downloaded ? "checkmark.circle" : "arrow.down.circle.dotted")))
+                    .foregroundStyle(loaded ? .green : (progress != nil ? .blue : (downloaded ? .green : .secondary)))
+                Text(model.displayName)
+                Text(String(format: "%.1f GB", model.approximateGB))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
                 Spacer(minLength: 8)
                 if !downloaded && progress == nil {
                     Button("Download") {
-                        modelDownloader.startDownload(kind.displayName)
+                        modelDownloader.startDownload(model.id)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                 }
             }
+
+            CapabilityBadges(model: model)
+
             if let progress {
                 if let err = progress.error {
                     Text("Error: \(err)")
@@ -128,6 +169,38 @@ private struct ModelRow: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+}
+
+/// What a model can and cannot do, at a glance.
+private struct CapabilityBadges: View {
+    let model: BigBroModel
+
+    var body: some View {
+        HStack(spacing: 4) {
+            badge("Tools", "wrench.and.screwdriver", on: model.supportsTools)
+            badge("Images", "photo", on: model.supportsImages)
+            badge(reasoningLabel, "brain", on: model.reasoning.producesTrace)
+        }
+    }
+
+    private var reasoningLabel: String {
+        switch model.reasoning {
+        case .none:                        return "No reasoning"
+        case .harmony:                     return "Reasoning (low/med/high)"
+        case .thinkTags(let togglable):    return togglable ? "Reasoning (on/off)" : "Always reasons"
+        }
+    }
+
+    private func badge(_ text: String, _ icon: String, on: Bool) -> some View {
+        Label(text, systemImage: on ? icon : "\(icon).badge.ellipsis")
+            .font(.caption2)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(on ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.1))
+            .foregroundStyle(on ? Color.primary : Color.secondary)
+            .clipShape(Capsule())
+            .opacity(on ? 1 : 0.65)
     }
 }
 
@@ -272,28 +345,32 @@ private struct DeviceRow: View {
     }
 }
 
-/// A device's declared-required-model name (legacy Ollama-style, e.g. `qwen3-vl:30b`) shown
-/// against whichever of the two fixed local models it maps to.
+/// A model a device declared it needs, shown against the catalog entry it resolves to.
+///
+/// The two can differ: clients predate the catalog and send Ollama-style tags, so
+/// `qwen3-vl:30b` resolves to whichever Qwen VL model is actually available. A name matching
+/// nothing resolves to nil and is shown as unrecognized rather than offered for download,
+/// since there is nothing to pull.
 private struct DeviceModelStatusRow: View {
     @EnvironmentObject var mlxEngine: MLXEngine
     @EnvironmentObject var modelDownloader: ModelDownloader
     let model: String
 
-    private var kind: MLXEngine.ModelKind { .matching(declaredName: model) }
+    private var resolved: BigBroModel? { ModelCatalog.resolve(model) }
 
     var body: some View {
         let satisfied = mlxEngine.isRequiredModelSatisfied(model)
-        let progress = modelDownloader.progress[kind.displayName]
+        let progress = resolved.flatMap { modelDownloader.progress[$0.id] }
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
                 Image(systemName: satisfied ? "checkmark.circle.fill" : (progress != nil ? "arrow.down.circle" : "xmark.circle.fill"))
                     .foregroundStyle(satisfied ? .green : (progress != nil ? .blue : .red))
-                Text("\(model) → \(kind.displayName)")
+                Text(resolved.map { "\(model) → \($0.displayName)" } ?? "\(model) — not a model BigBro knows")
                     .font(.caption)
                 Spacer(minLength: 8)
-                if !satisfied && progress == nil {
+                if let resolved, !satisfied, progress == nil {
                     Button("Download") {
-                        modelDownloader.startDownload(kind.displayName)
+                        modelDownloader.startDownload(resolved.id)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.mini)

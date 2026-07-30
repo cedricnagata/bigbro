@@ -15,6 +15,7 @@ enum InferenceError: Error, LocalizedError {
     case invalidImage(messageIndex: Int)
     case modelNotSelected(capability: String)
     case generationFailed(String)
+    case unknownModel(String)
 
     var errorDescription: String? {
         switch self {
@@ -24,6 +25,8 @@ enum InferenceError: Error, LocalizedError {
             return "No \(capability) model is selected. Pick one in BigBro Settings → Speech."
         case .generationFailed(let message):
             return message
+        case .unknownModel(let name):
+            return "'\(name)' is not a model BigBro knows about."
         }
     }
 }
@@ -37,55 +40,52 @@ enum InferenceEvent {
     case toolCalls([[String: Any]])
 }
 
-/// Runs gpt-oss-20b (text) and Qwen2.5-VL-3B (vision) in-process via MLX, replacing the
-/// Ollama/LocalAI OpenAI-compatible proxy. Both models can stay resident at once — roughly
-/// 12 GB + 2 GB — so unlike little-chef (a phone app, one model at a time) this never evicts
-/// one to make room for the other.
+/// What was actually done with a request, once the model's capabilities were taken into
+/// account. Reported alongside the stream so `AppRouter` can tell the client what it did not
+/// get, rather than leaving it to infer from an answer that quietly ignored half the request.
+struct ResolvedRequest: Sendable {
+    let model: BigBroModel
+    /// True when tools were dropped because the model cannot call them.
+    let droppedTools: Bool
+    /// True when a `reasoning_effort` was dropped because the model has no effort control.
+    let droppedReasoningEffort: Bool
+    /// Set when images forced a different model than the one asked for.
+    let substitutedForImages: Bool
+}
+
+/// Runs MLX models in-process, replacing the Ollama/LocalAI OpenAI-compatible proxy.
+///
+/// Any model in `ModelCatalog` can be downloaded and run, and more than one can stay resident
+/// at once — the Mac has the memory for a 12 GB text model and a 2 GB vision model together,
+/// so unlike a phone app there is no need to evict one to make room for the other. Containers
+/// are keyed by model id and never evicted; a Mac that loads several large models will hold
+/// them all.
 @MainActor
 final class MLXEngine: ObservableObject, BackendStatusReporting {
     static let shared = MLXEngine()
 
-    enum ModelKind: String, CaseIterable {
-        case text
-        case vision
+    @Published private(set) var loadProgress: [String: Double] = [:]
+    @Published private(set) var loadErrors: [String: String] = [:]
 
-        var configuration: ModelConfiguration {
-            switch self {
-            case .text:   return LLMRegistry.gpt_oss_20b_MXFP4_Q8
-            case .vision: return VLMRegistry.qwen2_5VL3BInstruct4Bit
-            }
-        }
-
-        var displayName: String {
-            switch self {
-            case .text:   return "gpt-oss-20b"
-            case .vision: return "Qwen2.5-VL-3B"
-            }
-        }
-
-        fileprivate var readyDefaultsKey: String { "bigbro.modelReady.\(rawValue)" }
-
-        /// Maps a legacy Ollama-style declared name (`gpt-oss:20b`, `qwen3-vl:30b`) onto
-        /// whichever local model it plausibly refers to — the only signal such a name gives
-        /// us now that there are exactly two fixed models. The one heuristic every other
-        /// name-to-capability decision in the app (routing, missing-model checks, download
-        /// progress lookups) goes through, so they can never drift apart.
-        static func matching(declaredName name: String) -> ModelKind {
-            name.lowercased().contains("vl") ? .vision : .text
-        }
-    }
-
-    @Published private(set) var loadProgress: [ModelKind: Double] = [:]
-    @Published private(set) var loadErrors: [ModelKind: String] = [:]
-
-    private var containers: [ModelKind: ModelContainer] = [:]
-    private var loadingTasks: [ModelKind: Task<ModelContainer, Error>] = [:]
+    private var containers: [String: ModelContainer] = [:]
+    private var loadingTasks: [String: Task<ModelContainer, Error>] = [:]
 
     private init() {
         // little-chef's 20 MB cache limit exists to avoid phone jetsam under memory
-        // pressure; nothing like that applies here, and two resident models benefit from
-        // MLX being able to actually cache buffers between requests.
+        // pressure; nothing like that applies here, and resident models benefit from MLX
+        // being able to actually cache buffers between requests.
         MLX.Memory.cacheLimit = 512 * 1024 * 1024
+    }
+
+    // MARK: - Selection
+
+    /// The model used when a request names none, or names one this Mac does not have.
+    var defaultTextModel: BigBroModel {
+        ModelCatalog.model(id: AppSettings.shared.textModelID) ?? ModelCatalog.defaultText
+    }
+
+    var defaultVisionModel: BigBroModel {
+        ModelCatalog.model(id: AppSettings.shared.visionModelID) ?? ModelCatalog.defaultVision
     }
 
     // MARK: - BackendStatusReporting
@@ -95,27 +95,33 @@ final class MLXEngine: ObservableObject, BackendStatusReporting {
     var status: BackendStatus { .running }
 
     var runningSummary: String {
-        let ready = ModelKind.allCases.filter { isLoaded($0) }.count
-        return "Running (\(ready)/\(ModelKind.allCases.count) model\(ModelKind.allCases.count == 1 ? "" : "s") loaded)"
+        let ready = containers.count
+        return "Running (\(ready) model\(ready == 1 ? "" : "s") loaded)"
     }
 
     var detailItems: [String] {
-        ModelKind.allCases.map { "\($0.displayName): \(stateDescription($0))" }
+        // Only models the user has some relationship with — listing every catalog entry as
+        // "not downloaded" would bury the two or three that matter.
+        ModelCatalog.all
+            .filter { isDownloaded($0.id) || loadProgress[$0.id] != nil || loadErrors[$0.id] != nil }
+            .map { "\($0.displayName): \(stateDescription($0.id))" }
     }
 
     var unreachableHint: String { "" }
 
-    private func stateDescription(_ kind: ModelKind) -> String {
-        if isLoaded(kind) { return "loaded" }
-        if let error = loadErrors[kind] { return "error: \(error)" }
-        if let p = loadProgress[kind] { return "downloading \(Int((p * 100).rounded()))%" }
-        if isDownloaded(kind) { return "downloaded" }
+    private func stateDescription(_ id: String) -> String {
+        if isLoaded(id) { return "loaded" }
+        if let error = loadErrors[id] { return "error: \(error)" }
+        if let p = loadProgress[id] { return "downloading \(Int((p * 100).rounded()))%" }
+        if isDownloaded(id) { return "downloaded" }
         return "not downloaded"
     }
 
     // MARK: - Model lifecycle
 
-    func isLoaded(_ kind: ModelKind) -> Bool { containers[kind] != nil }
+    func isLoaded(_ id: String) -> Bool { containers[id] != nil }
+
+    private func readyDefaultsKey(_ id: String) -> String { "bigbro.modelReady.\(id)" }
 
     /// Best-effort "has this been downloaded" check, deliberately *not* a cache-path guess.
     /// little-chef's `isModelDownloaded` inspects the Hub cache directory directly and will
@@ -123,115 +129,176 @@ final class MLXEngine: ObservableObject, BackendStatusReporting {
     /// true once a load has actually completed — mlx-swift-lm's own downloader is the
     /// authority on whether cached files are complete, and re-running it after a genuine
     /// prior success is a fast cache hit, not a re-download.
-    func isDownloaded(_ kind: ModelKind) -> Bool {
-        isLoaded(kind) || UserDefaults.standard.bool(forKey: kind.readyDefaultsKey)
+    func isDownloaded(_ id: String) -> Bool {
+        isLoaded(id) || UserDefaults.standard.bool(forKey: readyDefaultsKey(id))
     }
 
+    func isDownloading(_ id: String) -> Bool { loadingTasks[id] != nil }
+
     @discardableResult
-    func ensureLoaded(_ kind: ModelKind, onProgress: (@Sendable (Double) -> Void)? = nil) async throws -> ModelContainer {
-        if let container = containers[kind] { return container }
-        if let existing = loadingTasks[kind] { return try await existing.value }
+    func ensureLoaded(
+        _ model: BigBroModel,
+        onProgress: (@Sendable (Double) -> Void)? = nil
+    ) async throws -> ModelContainer {
+        let id = model.id
+        if let container = containers[id] { return container }
+        if let existing = loadingTasks[id] { return try await existing.value }
 
         let task = Task<ModelContainer, Error> { [weak self] in
             guard let self else { throw CancellationError() }
             do {
                 let progressHandler: @Sendable (Progress) -> Void = { progress in
                     Task { @MainActor in
-                        self.loadProgress[kind] = progress.fractionCompleted
+                        self.loadProgress[id] = progress.fractionCompleted
                         onProgress?(progress.fractionCompleted)
                     }
                 }
                 let container: ModelContainer
-                switch kind {
-                case .text:
+                switch model.family {
+                case .language:
                     container = try await LLMModelFactory.shared.loadContainer(
                         from: #hubDownloader(),
                         using: #huggingFaceTokenizerLoader(),
-                        configuration: kind.configuration,
+                        configuration: model.configuration,
                         progressHandler: progressHandler
                     )
                 case .vision:
                     container = try await VLMModelFactory.shared.loadContainer(
                         from: #hubDownloader(),
                         using: #huggingFaceTokenizerLoader(),
-                        configuration: kind.configuration,
+                        configuration: model.configuration,
                         progressHandler: progressHandler
                     )
                 }
                 await MainActor.run {
-                    self.containers[kind] = container
-                    self.loadProgress[kind] = 1.0
-                    self.loadErrors[kind] = nil
-                    self.loadingTasks[kind] = nil
-                    UserDefaults.standard.set(true, forKey: kind.readyDefaultsKey)
+                    self.containers[id] = container
+                    self.loadProgress[id] = 1.0
+                    self.loadErrors[id] = nil
+                    self.loadingTasks[id] = nil
+                    UserDefaults.standard.set(true, forKey: self.readyDefaultsKey(id))
                 }
                 return container
             } catch {
                 await MainActor.run {
-                    self.loadErrors[kind] = error.localizedDescription
-                    self.loadingTasks[kind] = nil
+                    self.loadErrors[id] = error.localizedDescription
+                    self.loadingTasks[id] = nil
                 }
                 throw error
             }
         }
-        loadingTasks[kind] = task
+        loadingTasks[id] = task
         return try await task.value
+    }
+
+    /// Drops a loaded model's weights. The download stays on disk, so reloading is fast.
+    func unload(_ id: String) {
+        containers.removeValue(forKey: id)
+        loadProgress.removeValue(forKey: id)
+    }
+
+    /// Forgets that a model was ever downloaded, so the next load re-fetches it. Does not
+    /// delete the Hugging Face cache — mlx-swift-lm owns that, and a stale-but-complete cache
+    /// is a fast re-verify rather than a re-download.
+    func forgetDownload(_ id: String) {
+        unload(id)
+        loadErrors.removeValue(forKey: id)
+        UserDefaults.standard.removeObject(forKey: readyDefaultsKey(id))
+    }
+
+    // MARK: - Routing
+
+    /// Picks the model for a request, honouring what the client asked for where possible.
+    ///
+    /// Images override the request's model choice. A language model handed an image cannot
+    /// describe it — it has no vision tower and the image never reaches the prompt — so
+    /// silently answering from the text alone would be worse than substituting a model that
+    /// can actually see, which is what happens here.
+    func resolve(
+        requestedModel name: String?,
+        messages: [[String: Any]],
+        toolCount: Int = 0,
+        reasoningEffort: String? = nil
+    ) -> ResolvedRequest {
+        let hasImages = messages.contains { ($0["images"] as? [String])?.isEmpty == false }
+        let requested = name.flatMap { $0.isEmpty ? nil : ModelCatalog.resolve($0) }
+
+        var model = requested ?? (hasImages ? defaultVisionModel : defaultTextModel)
+        var substituted = false
+        if hasImages && !model.supportsImages {
+            model = defaultVisionModel
+            substituted = true
+        }
+        return ResolvedRequest(
+            model: model,
+            droppedTools: toolCount > 0 && !model.supportsTools,
+            droppedReasoningEffort: reasoningEffort != nil && !model.reasoning.acceptsEffort,
+            substitutedForImages: substituted
+        )
+    }
+
+    /// True if the capability a request would need is ready without first triggering a
+    /// multi-gigabyte download. Used for the `hello` missing-model check, where a client
+    /// declares the models it expects.
+    func isRequiredModelSatisfied(_ name: String) -> Bool {
+        guard let model = ModelCatalog.resolve(name) else {
+            // A name matching nothing in the catalog cannot be "missing" in a way the user
+            // could fix by downloading, so don't report it and don't offer to pull it.
+            return true
+        }
+        return isDownloaded(model.id)
     }
 
     // MARK: - Chat
 
-    /// Which capability a request needs, decided purely by whether any message carries
-    /// images — never by the `model` name the client asked for. BigBroKit clients predate
-    /// this backend and pass Ollama-style tags (`gpt-oss:20b`, `qwen3-vl:30b`); routing on
-    /// content rather than name means those names never need to match anything real.
-    func kind(for messages: [[String: Any]]) -> ModelKind {
-        let hasImages = messages.contains { ($0["images"] as? [String])?.isEmpty == false }
-        return hasImages ? .vision : .text
-    }
-
-    /// True if the capability a request would need is ready to use without first triggering
-    /// a multi-gigabyte download. Named model strings from the client (see `kind(for:)`) are
-    /// mapped onto that same capability using a "does the name mention vision" heuristic —
-    /// the only signal a legacy Ollama-style name gives us — so existing clients' `hello`
-    /// required-model lists still produce a sensible missing/ready state.
-    func isRequiredModelSatisfied(_ name: String) -> Bool {
-        isDownloaded(.matching(declaredName: name))
-    }
-
-    /// Passed as `additionalContext` to the chat template, which forwards it into the Harmony
-    /// system message as `Reasoning: <level>`. This is a generation-time lever, unlike
-    /// `AppRouter`'s `sendReasoning` flag, which only gates what's forwarded to the peer after
-    /// generation — `reasoningEffort` is what actually changes how long the model spends in
-    /// the analysis channel before it reaches the final one. `nil` leaves the template's own
-    /// default (gpt-oss defaults to "medium") in place.
+    /// Runs one request, adapting it to what the chosen model can actually do.
+    ///
+    /// Three capabilities are negotiated here rather than assumed, because getting any of
+    /// them wrong fails quietly rather than loudly:
+    ///
+    ///   - **Tools.** A model whose chat template has no tools slot either throws when handed
+    ///     tool definitions or drops them. Neither tells the caller anything, so tools are
+    ///     removed before templating and the omission is reported back.
+    ///   - **Reasoning effort.** `reasoning_effort` is meaningful only to harmony models. Put
+    ///     into any other template it is an unused variable at best; for Qwen3 the equivalent
+    ///     lever is `enable_thinking`, a different key with different semantics.
+    ///   - **Output framing.** Each model's reasoning style decides how the raw stream is
+    ///     parsed back apart. See `ResponseParser`.
     func chatStream(
+        model: BigBroModel,
         messages rawMessages: [[String: Any]],
         tools rawTools: [[String: Any]],
         options: [String: Any]?,
-        reasoningEffort: String? = nil
+        reasoningEffort: String? = nil,
+        wantsThinking: Bool = true
     ) -> AsyncThrowingStream<InferenceEvent, Error> {
         AsyncThrowingStream { continuation in
             Task {
                 do {
-                    let kind = self.kind(for: rawMessages)
                     let chatMessages = try Self.chatMessages(from: rawMessages)
-                    let toolSpecs = Self.toolSpecs(from: rawTools)
-
-                    let container = try await self.ensureLoaded(kind)
-                    let additionalContext = reasoningEffort.map { ["reasoning_effort": $0] }
-                    let userInput = UserInput(chat: chatMessages, tools: toolSpecs, additionalContext: additionalContext)
-                    let parameters = Self.generateParameters(from: options)
-
-                    let stream: AsyncStream<Generation> = try await container.perform { (context: ModelContext) in
-                        let lmInput = try await context.processor.prepare(input: userInput)
-                        return try MLXLMCommon.generate(input: lmInput, parameters: parameters, context: context)
+                    let toolSpecs = model.supportsTools ? Self.toolSpecs(from: rawTools) : nil
+                    if !model.supportsTools && !rawTools.isEmpty {
+                        print("[MLXEngine] \(model.id) cannot call tools — dropped \(rawTools.count)")
                     }
 
-                    let harmony = HarmonyStreamParser()
+                    let container = try await self.ensureLoaded(model)
+                    let context = Self.templateContext(
+                        for: model,
+                        reasoningEffort: reasoningEffort,
+                        wantsThinking: wantsThinking
+                    )
+                    let userInput = UserInput(chat: chatMessages, tools: toolSpecs, additionalContext: context)
+                    let parameters = Self.generateParameters(from: options)
+
+                    let stream: AsyncStream<Generation> = try await container.perform { (ctx: ModelContext) in
+                        let lmInput = try await ctx.processor.prepare(input: userInput)
+                        return try MLXLMCommon.generate(input: lmInput, parameters: parameters, context: ctx)
+                    }
+
+                    let parser = model.reasoning.makeParser()
                     for await generation in stream {
                         switch generation {
                         case .chunk(let text):
-                            for event in harmony.feed(text) {
+                            for event in parser.feed(text) {
                                 continuation.yield(Self.inferenceEvent(from: event))
                             }
                         case .toolCall(let call):
@@ -242,7 +309,7 @@ final class MLXEngine: ObservableObject, BackendStatusReporting {
                             break
                         }
                     }
-                    for event in harmony.finish() {
+                    for event in parser.finish() {
                         continuation.yield(Self.inferenceEvent(from: event))
                     }
                     continuation.finish()
@@ -253,7 +320,39 @@ final class MLXEngine: ObservableObject, BackendStatusReporting {
         }
     }
 
-    private static func inferenceEvent(from event: HarmonyStreamParser.ParsedEvent) -> InferenceEvent {
+    /// Extra variables handed to the chat template, chosen per model.
+    ///
+    /// Passing the wrong key is not harmless. Templates are Jinja, and an unexpected variable
+    /// is ignored — so a `reasoning_effort` sent to Qwen3 does nothing at all while looking
+    /// like it worked. Each style gets only the key its own template defines.
+    private static func templateContext(
+        for model: BigBroModel,
+        reasoningEffort: String?,
+        wantsThinking: Bool
+    ) -> [String: any Sendable]? {
+        switch model.reasoning {
+        case .harmony:
+            // A string, because the harmony template interpolates it into the system message
+            // as text: `Reasoning: <level>`. nil leaves the template's own default ("medium")
+            // — gpt-oss always reasons, only the budget is adjustable.
+            return reasoningEffort.map { ["reasoning_effort": $0] }
+
+        case .thinkTags(let togglable):
+            // A Bool, not the string "false" — these templates branch on
+            // `{% if enable_thinking %}`, and Jinja treats any non-empty string as truthy, so
+            // "false" would enable thinking while looking like it disabled it.
+            guard togglable else { return nil }
+            // Qwen3 has no effort dial, only on/off. "low" is the closest thing a caller can
+            // say to "think less", so it maps onto the only lever the template has.
+            let enabled = wantsThinking && reasoningEffort != "low"
+            return ["enable_thinking": enabled]
+
+        case .none:
+            return nil
+        }
+    }
+
+    private static func inferenceEvent(from event: ParsedResponseEvent) -> InferenceEvent {
         switch event {
         case .reasoning(let text):
             return .reasoning(text)
@@ -282,11 +381,10 @@ final class MLXEngine: ObservableObject, BackendStatusReporting {
 
     // MARK: - Generation parameters
 
-    /// Only `maxTokens` and `temperature` are wired in little-chef; this maps the rest of
-    /// `GenerationOptions` where `GenerateParameters` has an equivalent (`topK`, `topP`,
-    /// `seed`, the three penalties) and silently drops what has none (`num_ctx`, `num_thread`,
-    /// `stop`) — the same "forward what maps, ignore what can't" discipline the OpenAI proxy
-    /// used for its own backend extensions.
+    /// Maps `GenerationOptions` onto `GenerateParameters` where an equivalent exists (`topK`,
+    /// `topP`, `seed`, the three penalties) and silently drops what has none (`num_ctx`,
+    /// `num_thread`, `stop`) — the same "forward what maps, ignore what can't" discipline the
+    /// OpenAI proxy used for its own backend extensions.
     private static func generateParameters(from options: [String: Any]?) -> GenerateParameters {
         var parameters = GenerateParameters()
         guard let options else { return parameters }
