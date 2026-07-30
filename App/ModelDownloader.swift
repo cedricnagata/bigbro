@@ -6,7 +6,7 @@ import Combine
 /// Throttled progress updates (~1/sec) are emitted via a Combine publisher so both the Mac
 /// UI and the peer broadcaster can subscribe without flooding.
 ///
-/// The transport lives behind `ModelInstalling` — `MLXInstaller` drives `MLXEngine.ensureLoaded`
+/// The transport lives behind `ModelInstalling` — `MLXInstaller` drives `MLXEngine.download`
 /// — so this type only coordinates state and throttling.
 @MainActor
 final class ModelDownloader: ObservableObject {

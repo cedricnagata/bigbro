@@ -41,8 +41,9 @@ Models differ in what they support, and BigBro adapts rather than refusing — s
 [Capability mismatches](#capability-mismatches). Requests carrying images always run on the
 vision model regardless of what was asked for, since a language model has no vision tower.
 
-Any number of models can stay resident at once; loading one never evicts another. Nothing is
-ever unloaded automatically, so a Mac that runs several large models holds them all.
+Any number of models can run at once; starting one never stops another. Nothing is ever
+stopped automatically, so a Mac running several large models holds them all in memory until
+told otherwise — see [Model lifecycle](#model-lifecycle).
 
 Tool calling for gpt-oss runs through its [harmony response format](https://cookbook.openai.com/articles/openai-harmony) —
 BigBro parses the `analysis`/`final`/`commentary` channels out of the raw token stream itself,
@@ -75,8 +76,9 @@ Open **Settings** (⌘,) for two tabs:
 **General**
 - **Defaults** — which model answers when a device doesn't name one, for text and for vision
 - **Language models** / **Vision models** — one row per catalog model showing capability badges
-  (tools, images, reasoning), size, and state: not downloaded / downloading (%) / loaded, with a
-  **Download** button
+  (tools, images, reasoning), size, and lifecycle state: not downloaded / downloading (%) /
+  downloaded / starting / running, with **Download**, **Run**, **Stop** and **Remove** buttons
+  as they apply
 - **Speech** — off by default; when enabled, shows one row per speech model (Kokoro, Parakeet)
   with its own download progress, plus a free-form Kokoro voice field (e.g. `af_heart`) and
   **Preview**
@@ -114,7 +116,8 @@ existing BigBroKit clients work against this branch without a rebuild.
 | `generateRequest` | `requestId`, `prompt`, `streaming`, `images?`, `system?`, `model?`, `options?`, `think?`, `reasoning_effort?` | Single-turn generate |
 | `speechRequest` | `requestId`, `input`, `voice?`, `speed?` | Text-to-speech |
 | `transcribeRequest` | `requestId`, `audio` (base64), `audioFormat?` | Speech-to-text. Max 10 MB decoded |
-| `preload` | `requestId`, `model?` (a catalog id, or `"text"` / `"vision"` / `"tts"` / `"stt"` / `"speech"`, default `"text"`) | Loads a model into memory without generating anything — see below |
+| `run` | `requestId`, `model?` (a catalog id, or `"text"` / `"vision"` / `"tts"` / `"stt"` / `"speech"`, default `"text"`) | Starts a model — puts its weights in memory — without generating anything |
+| `stop` | `requestId`, `model?` (a catalog id, or `"text"` / `"vision"`, default `"text"`) | Unloads a model from memory, keeping the download |
 | `bye` | — | Clean disconnect |
 
 `model` names a catalog entry (see below). Absent or unrecognized, the Mac's configured
@@ -183,28 +186,52 @@ When `reasoning_effort` is absent, `think: false` is read as a request for speed
 the budget to `low` — preserving what that flag did on its own before clients could name a
 level. An explicit `reasoning_effort` always wins over that inference.
 
-### Preloading a model
+### Model lifecycle
 
-Loading a model — reading its weights off disk and materializing them into MLX arrays — is a
-real, multi-second cost that BigBro only pays lazily, the first time a request actually needs
-that model. That cost otherwise lands on whichever message happens to be first. Send `preload`
-when a chat session is likely to start soon (e.g. when the chat screen appears) to move it
-earlier instead:
+Downloaded and running are different states, and BigBro treats them separately because they
+cost different things: weights on disk cost only disk, weights in memory cost RAM — 12 GB of
+it for gpt-oss-20b. A model can sit downloaded indefinitely at no cost until something needs it.
 
-- If the model is already downloaded, BigBro loads it into memory and replies with `done`
-  once it's ready to use — nothing is generated.
-- If it isn't downloaded yet, this triggers the same `modelDownloading` flow a real request
-  would.
+| Operation | Effect | Where |
+|---|---|---|
+| **Download** | Fetches weights to disk. Does not use memory. | Settings, or automatically when a request needs a model that isn't there |
+| **Run** | Materializes weights into memory so the model can answer | Settings, the `run` message, or automatically on first request |
+| **Stop** | Frees the memory, keeps the download | Settings, or the `stop` message |
+| **Remove** | Deletes the weights from disk | Settings only |
 
-BigBroKit exposes this as `BigBroClient.preloadModel(vision:)`. It's a pure optimization —
-skipping it is harmless, since `request`/`generateRequest` load the model themselves anyway if
-it isn't already resident.
+Removal is deliberately not on the wire. It is destructive and irreversible over a slow
+download, so it belongs to whoever owns the Mac rather than to any paired device. Stopping is
+fine to expose — the download survives, so the worst case is a slow next request — but note
+that models are shared by every paired device, so one device stopping a model takes it away
+from all of them.
 
-`"tts"`, `"stt"` and `"speech"` (both) warm Kokoro and Parakeet instead, via
-`BigBroClient.preloadSpeech()`. BigBro already loads these at launch whenever speech is
-enabled, so this is usually instant — its real job is giving a client somewhere to *wait*.
-That matters for a hands-free voice loop, where a cold model load would otherwise swallow the
-first thing the user says. Errors if speech is switched off in Settings.
+Deleting means deleting the directory `mlx-swift-lm`'s downloader reported when it fetched the
+model, recorded at download time. BigBro never guesses at the Hugging Face cache layout; a
+model downloaded by a build that predates path tracking is simply forgotten rather than having
+some inferred path deleted.
+
+#### Starting a model ahead of time
+
+Starting a model is a real multi-second cost that BigBro otherwise pays lazily, on whichever
+message happens to be first. Send `run` when a session is likely to start soon (e.g. when the
+chat screen appears) to move it earlier instead:
+
+- If the model is downloaded, BigBro loads it and replies `done` once it can answer — nothing
+  is generated.
+- If it isn't downloaded, this triggers the same `modelDownloading` flow a real request would.
+
+BigBroKit exposes this as `BigBroClient.runModel(_:)` and `stopModel(_:)`. Both are pure
+optimizations — skipping `run` is harmless, since a request starts the model it needs anyway.
+`preload` is still accepted as an alias for `run`, so clients built before the rename keep
+working.
+
+`"tts"`, `"stt"` and `"speech"` (both) start Kokoro and Parakeet instead, via
+`BigBroClient.runSpeech()`. BigBro already starts these at launch whenever speech is enabled,
+so this is usually instant — its real job is giving a client somewhere to *wait*. That matters
+for a hands-free voice loop, where a cold model load would otherwise swallow the first thing
+the user says. Errors if speech is switched off in Settings. There is no matching stop: speech
+models are shared and reload slowly, so letting one client evict them for everyone isn't a
+trade worth offering.
 
 ### Spoken conversation
 
