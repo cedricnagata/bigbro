@@ -15,8 +15,9 @@ import signal
 import sys
 from typing import Any
 
-from .config import DEFAULT_PORT
+from .config import DEFAULT_PORT, Settings
 from .control import ControlServer
+from .events import EventBus
 from .inference import catalog
 from .inference.downloader import ModelDownloader, Progress
 from .inference.engine import MLXEngine
@@ -31,10 +32,21 @@ log = logging.getLogger("bigbro.daemon")
 
 
 class Daemon:
-    def __init__(self, port: int = DEFAULT_PORT, keep_awake: bool = True) -> None:
-        self.port = port
-        self.keep_awake = keep_awake
+    def __init__(
+        self,
+        port: int | None = None,
+        keep_awake: bool | None = None,
+        settings: Settings | None = None,
+    ) -> None:
+        # Flags win over the file: a flag is what someone typed for this run, the
+        # file is what they left configured.
+        self.settings = settings or Settings.load()
+        if port is not None:
+            self.settings.port = port
+        if keep_awake is not None:
+            self.settings.keep_awake = keep_awake
 
+        self.events = EventBus()
         self.downloader = ModelDownloader()
         self.engine = MLXEngine(self.downloader)
         self.speech = SpeechEngine(self.downloader.record)
@@ -43,11 +55,21 @@ class Daemon:
         self.advertiser = BonjourAdvertiser()
         self.power = PowerAssertion()
         self.router = AppRouter(self.server, self.pairing, self.engine, self.speech)
-        self.control = ControlServer(self.handle_control)
+        self.control = ControlServer(self.handle_control, bus=self.events)
 
         self.server.delegate = self.router
         self.pairing.is_model_satisfied = self.engine.is_required_model_satisfied
+        self.pairing.publish = self.events.publish
+        self.router.on_peer_change = self._on_peer_change
         self.downloader.on_progress = self._on_download_progress
+
+    @property
+    def port(self) -> int:
+        return self.settings.port
+
+    @property
+    def keep_awake(self) -> bool:
+        return self.settings.keep_awake
 
         self._stopping = asyncio.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -96,7 +118,7 @@ class Daemon:
     # MARK: - Download progress
 
     def _on_download_progress(self, model_id: str, progress: Progress) -> None:
-        """Broadcasts progress to every connected peer.
+        """Broadcasts progress to every connected peer, and to attached UIs.
 
         Sent for every download — peers decide which to surface based on what they
         care about.
@@ -113,8 +135,34 @@ class Daemon:
             if progress.error:
                 message["error"] = progress.error
 
+        self.events.publish(
+            "download.progress",
+            model=model_id,
+            status=progress.status,
+            completed=progress.bytes_completed,
+            total=progress.bytes_total,
+            fraction=progress.fraction,
+            done=progress.done,
+            error=progress.error,
+            state=self.engine.state_description(model_id),
+        )
+
         if self._loop is not None:
             asyncio.ensure_future(self.server.broadcast(message))
+
+    def _on_peer_change(self, device_id: str, connected: bool) -> None:
+        """Announces a device connecting or dropping, so the Devices pane can move."""
+        self.events.publish(
+            "peer.connected" if connected else "peer.disconnected",
+            deviceId=device_id,
+            name=self.pairing.display_name(device_id),
+            connected=self.server.connected_device_ids,
+        )
+
+    def _publish_model_state(self, model_id: str) -> None:
+        self.events.publish(
+            "model.state", model=model_id, state=self.engine.state_description(model_id)
+        )
 
     # MARK: - Control commands
 
@@ -133,6 +181,8 @@ class Daemon:
             "models.run": self._control_models_run,
             "models.stop": self._control_models_stop,
             "models.remove": self._control_models_remove,
+            "settings.get": self._control_settings_get,
+            "settings.set": self._control_settings_set,
         }
         handler = handlers.get(command)
         if handler is None:
@@ -254,8 +304,18 @@ class Daemon:
                 await self.speech.run(kinds[name])
                 return {"ok": True, "model": name}
             return {"ok": False, "error": f"'{name}' is not a model BigBro knows about."}
-        await self.engine.run(model)
-        return {"ok": True, "model": model.id}
+        # Loading a 12 GB model takes long enough that holding the control reply
+        # would look like the UI had frozen. Report state through events instead.
+        self._publish_model_state(model.id)
+        asyncio.ensure_future(self._run_and_publish(model))
+        return {"ok": True, "model": model.id, "started": True}
+
+    async def _run_and_publish(self, model) -> None:
+        try:
+            await self.engine.run(model)
+        except Exception as exc:
+            log.error("run failed for %s: %s", model.id, exc)
+        self._publish_model_state(model.id)
 
     async def _control_models_stop(self, request: dict[str, Any]) -> dict[str, Any]:
         name, model = self._lookup(request)
@@ -266,6 +326,7 @@ class Daemon:
                 return {"ok": True, "model": name}
             return {"ok": False, "error": f"'{name}' is not a model BigBro knows about."}
         self.engine.stop(model.id)
+        self._publish_model_state(model.id)
         return {"ok": True, "model": model.id}
 
     async def _control_models_remove(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -277,7 +338,34 @@ class Daemon:
                 return {"ok": True, "model": name}
             return {"ok": False, "error": f"'{name}' is not a model BigBro knows about."}
         self.engine.remove(model)
+        self._publish_model_state(model.id)
         return {"ok": True, "model": model.id}
+
+    # MARK: - Settings
+
+    async def _control_settings_get(self, _request: dict[str, Any]) -> dict[str, Any]:
+        return {"ok": True, "settings": self.settings.to_wire(), "editable": list(Settings.EDITABLE)}
+
+    async def _control_settings_set(self, request: dict[str, Any]) -> dict[str, Any]:
+        key = str(request.get("key") or "")
+        changed, message = self.settings.apply(key, request.get("value"))
+        if not changed:
+            return {"ok": False, "error": message}
+
+        self.settings.save()
+
+        # Some settings take effect now; port needs a restart, and `apply` says so.
+        if key == "keep_awake":
+            if self.settings.keep_awake:
+                self.power.acquire("bigbro is serving nearby devices")
+            else:
+                self.power.release()
+        elif key == "log_level":
+            logging.getLogger("bigbro").setLevel(self.settings.log_level)
+
+        log.info("setting changed: %s — %s", key, message)
+        self.events.publish("settings.changed", settings=self.settings.to_wire())
+        return {"ok": True, "message": message, "settings": self.settings.to_wire()}
 
 
 def require_macos() -> None:

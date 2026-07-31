@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import sys
 
@@ -33,13 +34,19 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     serve = sub.add_parser("serve", help="run the inference daemon")
-    serve.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"TCP port (default {DEFAULT_PORT})")
+    serve.add_argument("--port", type=int, default=None, help=f"TCP port (default {DEFAULT_PORT})")
     serve.add_argument(
         "--no-keep-awake",
         action="store_true",
         help="let the Mac sleep normally instead of holding it awake while serving",
     )
+    serve.add_argument(
+        "--no-ui",
+        action="store_true",
+        help="plain logs instead of the dashboard, even on a terminal",
+    )
 
+    sub.add_parser("ui", help="attach the dashboard to a running daemon")
     sub.add_parser("status", help="show what the running daemon is doing")
 
     pair = sub.add_parser("pair", help="manage paired devices").add_subparsers(dest="action", required=True)
@@ -75,9 +82,62 @@ def cmd_serve(args: argparse.Namespace) -> int:
     from .daemon import Daemon, require_macos
 
     require_macos()
-    daemon = Daemon(port=args.port, keep_awake=not args.no_keep_awake)
+    # `--no-keep-awake` is a flag, so its absence cannot be distinguished from an
+    # explicit "yes" — pass None and let the config file decide unless it was given.
+    keep_awake = False if args.no_keep_awake else None
+    daemon = Daemon(port=args.port, keep_awake=keep_awake)
+
+    use_ui = not args.no_ui and sys.stdout.isatty() and sys.stdin.isatty()
     try:
-        asyncio.run(daemon.run())
+        asyncio.run(_serve_with_ui(daemon) if use_ui else daemon.run())
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+async def _serve_with_ui(daemon) -> None:
+    """Runs the daemon and the dashboard together, on one event loop.
+
+    The dashboard still talks over the control socket rather than reaching into the
+    daemon object, so this is the same code path `bigbro ui` takes — one
+    implementation, and the attached case cannot quietly diverge from this one.
+    """
+    from .events import LogEventHandler
+    from .tui import BigBroApp
+
+    # Stdout belongs to the TUI now. Log records reach the UI through the event bus
+    # instead; left on stdout they would tear the rendering apart.
+    root = logging.getLogger()
+    stream_handlers = [h for h in root.handlers if isinstance(h, logging.StreamHandler)]
+    for handler in stream_handlers:
+        root.removeHandler(handler)
+    root.addHandler(LogEventHandler(daemon.events))
+
+    server = asyncio.create_task(daemon.run())
+    try:
+        await BigBroApp(owns_daemon=True).run_async()
+    finally:
+        daemon.stop()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await asyncio.wait_for(server, timeout=10)
+
+
+def cmd_ui(_args: argparse.Namespace) -> int:
+    """Attaches the dashboard to a daemon started elsewhere. Quitting leaves it running."""
+    from .control import ControlClientError
+    from .tui import BigBroApp
+
+    async def main() -> None:
+        # Fail here with the actionable message rather than opening an empty
+        # dashboard that silently retries against nothing.
+        try:
+            await send_command({"command": "status"})
+        except ControlClientError as exc:
+            raise SystemExit(f"error: {exc}")
+        await BigBroApp(owns_daemon=False).run_async()
+
+    try:
+        asyncio.run(main())
     except KeyboardInterrupt:
         pass
     return 0
@@ -244,6 +304,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "serve":
         return cmd_serve(args)
+    if args.command == "ui":
+        return cmd_ui(args)
     if args.command == "status":
         return cmd_status(args)
     if args.command == "pair":

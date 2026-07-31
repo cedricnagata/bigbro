@@ -66,6 +66,10 @@ class PairingManager:
         #: Set by the daemon. Returns True when a model a client declared is ready.
         self.is_model_satisfied: Callable[[str], bool] = lambda _name: True
 
+        #: Set by the daemon. Publishes to attached UIs; a no-op when none exist,
+        #: which keeps pairing testable without standing up an event bus.
+        self.publish: Callable[..., None] = lambda _event, **_fields: None
+
         log.info("loaded %d approved device(s)", len(self._approved))
 
     # MARK: - Queries
@@ -152,18 +156,23 @@ class PairingManager:
         self._pending[device_id] = request
 
         log.warning(
-            "'%s' (%s) wants to pair — run: bigbro pair approve %s",
+            "'%s' (%s) wants to pair — approve in the dashboard, or run: bigbro pair approve %s",
             device_name, app_name, device_id[:8],
         )
+        self.publish("pairing.requested", **request.to_wire())
 
         try:
-            return await asyncio.wait_for(request.decision, timeout=PENDING_TIMEOUT_SECONDS)
+            approved = await asyncio.wait_for(request.decision, timeout=PENDING_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
             log.warning(
                 "pairing request from '%s' timed out after %ds — denying",
                 device_name, PENDING_TIMEOUT_SECONDS,
             )
+            self.publish("pairing.resolved", deviceId=device_id, approved=False, timedOut=True)
             return False
+        else:
+            self.publish("pairing.resolved", deviceId=device_id, approved=approved, timedOut=False)
+            return approved
         finally:
             # Only retract *this* request. A retrying client replaces its own earlier
             # request, and popping by device id alone would remove the replacement —

@@ -12,8 +12,8 @@ run separately. Your Mac downloads the models itself, on first use or from the C
 
 1. `bigbro serve` listens for connections on port 8765 (TCP) and holds the Mac awake while it runs
 2. An iOS app using [BigBroKit](https://github.com/cedricnagata/bigbro-kit) discovers your Mac via Bonjour (`_bigbro._tcp.`)
-3. The iOS app sends a pairing request — the daemon logs it and waits
-4. You run `bigbro pair approve <id>`; the Mac then remembers the device permanently and future reconnects are auto-approved silently
+3. The iOS app sends a pairing request — a prompt appears in the dashboard and the daemon waits
+4. You hit Enter (or run `bigbro pair approve <id>`); the Mac then remembers the device permanently and future reconnects are auto-approved silently
 5. Each request from iOS runs directly against the models loaded in the BigBro process and streams back in real time
 
 ## Requirements
@@ -45,14 +45,46 @@ nothing else on your machine is touched.
 ## Usage
 
 ```sh
-bigbro serve                    # run the daemon (Ctrl-C to stop)
+bigbro serve                    # run the daemon with the dashboard
 bigbro serve --port 9000        # listen somewhere else
 bigbro serve --no-keep-awake    # let the Mac sleep normally while serving
+bigbro serve --no-ui            # plain logs instead of the dashboard
 ```
+
+On a terminal this opens the dashboard; piped or under launchd it falls back to plain logs
+automatically, so the same command works in both places.
 
 Leave it running in a terminal, or put it behind launchd. Every other command talks to the running
 daemon over a Unix socket, so they work from any shell — including when the daemon has no terminal
 at all.
+
+### The dashboard
+
+```sh
+bigbro ui                       # attach to a daemon started elsewhere
+```
+
+`serve` renders it inline; `ui` attaches to a daemon already running (under launchd, in another
+window, over SSH). Quitting an attached dashboard leaves the daemon serving — only the one inside
+`serve` stops it.
+
+| Pane | What it does |
+|---|---|
+| **Devices** | Paired devices with live connection status, and anything awaiting approval |
+| **Models** | The catalog with capabilities and lifecycle state, download progress moving in place |
+| **Settings** | Port, keep-awake and log level, persisted to `config.json` |
+| **Log** | The daemon's log, including when attached over the control socket |
+
+`q` quit · `r` refresh · `d` run/stop the selected model (downloads it if it isn't on disk) ·
+`x` remove the selected device or model · `enter` approve a pairing request · `esc` deny it.
+
+**Pairing happens here.** When an unknown device connects, a prompt appears on its own — Enter
+approves, Escape denies. No second shell, no `bigbro pair approve`. The CLI commands still work
+and are still what you want under launchd; the dashboard is a client of exactly the same control
+socket, so the two never disagree.
+
+The daemon is deliberately not owned by the dashboard. A UI crash, a closed window or a dropped
+SSH session leaves inference running.
 
 ```sh
 bigbro status                   # what the daemon is doing right now
@@ -87,16 +119,17 @@ clamshell sleep and overrides the assertion. Display sleep is always allowed. Pa
 
 ### Pairing
 
-There is no GUI to show a modal, so an unknown device's `hello` **parks**: the connection is held
-open, unregistered, and the daemon logs
+An unknown device's `hello` **parks**: the connection is held open, unregistered, while the daemon
+waits for a decision. With the dashboard up that decision is a prompt and a keypress. Headless, the
+daemon logs
 
 ```
-WARNING  bigbro.pairing   'Cedric's iPhone' (MyApp) wants to pair — run: bigbro pair approve a1b2c3d4
+WARNING  bigbro.pairing   'Cedric's iPhone' (MyApp) wants to pair — approve in the dashboard, or run: bigbro pair approve a1b2c3d4
 ```
 
-Run that command in another shell and the handshake completes. A parked request is denied and
-closed after 5 minutes so an ignored one cannot hold a socket open forever — the device can always
-reconnect and ask again.
+and either `bigbro pair approve` from another shell or an attached `bigbro ui` completes the
+handshake. A parked request is denied and closed after 5 minutes so an ignored one cannot hold a
+socket open forever — the device can always reconnect and ask again.
 
 Approval travels over a Unix socket at `~/Library/Application Support/bigbro/control.sock`, mode
 `0600`. Nothing about pairing is reachable from the network the daemon advertises on.
@@ -346,7 +379,8 @@ Everything lives in `~/Library/Application Support/bigbro/` (override with `BIGB
 |---|---|
 | `devices.json` | Approved device ids, names and app names |
 | `downloads.json` | Catalog id → the directory its weights landed in |
-| `control.sock` | The Unix socket the CLI talks to, mode `0600` |
+| `config.json` | Port, keep-awake and log level. CLI flags override it |
+| `control.sock` | The Unix socket the CLI and dashboard talk to, mode `0600` |
 
 Model weights themselves live in the standard Hugging Face cache (`~/.cache/huggingface/hub`).
 
@@ -357,7 +391,9 @@ src/bigbro/
 ├── __main__.py             — the `bigbro` CLI
 ├── daemon.py               — wiring, lifecycle, control-command handlers
 ├── router.py               — message dispatch, capability negotiation, wire forwarding
-├── control.py              — Unix control socket (server + client)
+├── control.py              — Unix control socket: commands + the event stream
+├── events.py               — event fan-out to attached dashboards
+├── tui.py                  — the Textual dashboard (a control-socket client)
 ├── config.py               — support directory, atomic JSON store
 ├── speech.py               — Kokoro TTS + Parakeet STT via mlx-audio
 ├── macos/

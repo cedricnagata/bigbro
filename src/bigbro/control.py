@@ -28,13 +28,19 @@ Handler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 #: `sun_path` is 104 bytes on Darwin, 108 on Linux. Take the smaller.
 _MAX_UNIX_PATH = 104
 
+#: The one command that turns a connection into a long-lived event stream.
+SUBSCRIBE = "subscribe"
+
 
 class ControlServer:
-    """Serves control commands to `bigbro` CLI invocations."""
+    """Serves control commands to `bigbro` CLI invocations and attached UIs."""
 
-    def __init__(self, handler: Handler, path: Path | None = None) -> None:
+    def __init__(
+        self, handler: Handler, path: Path | None = None, bus: "EventBus | None" = None
+    ) -> None:
         self._handler = handler
         self._path = path or control_socket_path()
+        self._bus = bus
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
@@ -73,6 +79,11 @@ class ControlServer:
             request = await read_frame(reader)
             if request is None:
                 return
+
+            if request.get("command") == SUBSCRIBE:
+                await self._stream_events(reader, writer)
+                return
+
             try:
                 response = await self._handler(request)
             except Exception as exc:
@@ -85,6 +96,42 @@ class ControlServer:
             with contextlib.suppress(Exception):
                 writer.close()
                 await writer.wait_closed()
+
+    async def _stream_events(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """Holds the connection open and pushes events until the client goes away.
+
+        A dashboard cannot poll for a pairing request — the whole point is that it
+        appears on its own. This is the only long-lived shape on the control socket;
+        every other command is still one frame in, one frame out.
+        """
+        if self._bus is None:
+            await write_frame(writer, {"ok": False, "error": "this daemon publishes no events"})
+            return
+
+        queue = self._bus.subscribe()
+        await write_frame(writer, {"ok": True, "subscribed": True})
+        log.debug("event subscriber attached (%d total)", self._bus.subscriber_count)
+
+        # A subscriber that vanishes mid-stream is only detectable on write, which
+        # may not happen for a while on a quiet daemon. Watching for EOF alongside
+        # the queue lets the disconnect be noticed immediately.
+        disconnect = asyncio.create_task(reader.read(1))
+        try:
+            while True:
+                pending = asyncio.create_task(queue.get())
+                done, _ = await asyncio.wait(
+                    {pending, disconnect}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if disconnect in done:
+                    pending.cancel()
+                    break
+                await write_frame(writer, pending.result())
+        except (ConnectionError, asyncio.CancelledError):
+            pass
+        finally:
+            disconnect.cancel()
+            self._bus.unsubscribe(queue)
+            log.debug("event subscriber detached (%d left)", self._bus.subscriber_count)
 
 
 class ControlClientError(Exception):
@@ -112,3 +159,41 @@ async def send_command(command: dict[str, Any], path: Path | None = None) -> dic
     if response is None:
         raise ControlClientError("Daemon closed the connection without replying.")
     return response
+
+
+@contextlib.asynccontextmanager
+async def subscribe(path: Path | None = None):
+    """Yields an async iterator of daemon events, on its own connection.
+
+    Deliberately not multiplexed onto the command connection: a command is
+    short-lived and may be issued while the UI is mid-render, and interleaving
+    replies with pushed events on one socket would mean matching them up.
+    """
+    socket_path = path or control_socket_path()
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(socket_path))
+    except (FileNotFoundError, ConnectionRefusedError) as exc:
+        raise ControlClientError(
+            f"No running daemon found at {socket_path}. Start one with: bigbro serve"
+        ) from exc
+
+    try:
+        await write_frame(writer, {"command": SUBSCRIBE})
+        ack = await read_frame(reader)
+        if ack is None or not ack.get("ok"):
+            raise ControlClientError(
+                (ack or {}).get("error", "Daemon refused the event subscription.")
+            )
+
+        async def events():
+            while True:
+                event = await read_frame(reader)
+                if event is None:
+                    return
+                yield event
+
+        yield events()
+    finally:
+        with contextlib.suppress(Exception):
+            writer.close()
+            await writer.wait_closed()

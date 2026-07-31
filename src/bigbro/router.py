@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from .inference import catalog
 from .inference.engine import InferenceError, MLXEngine
@@ -81,6 +81,9 @@ class AppRouter:
         self.pairing = pairing
         self.engine = engine
         self.speech = speech
+        #: Set by the daemon: called with (device_id, connected) whenever a peer
+        #: attaches or drops, so an attached UI can move without polling.
+        self.on_peer_change: Callable[[str, bool], None] = lambda _id, _connected: None
 
     # MARK: - PeerServerDelegate
 
@@ -122,6 +125,7 @@ class AppRouter:
 
     async def on_peer_disconnected(self, device_id: str) -> None:
         self.pairing.mark_disconnected(device_id)
+        self.on_peer_change(device_id, False)
 
     # MARK: - Pairing
 
@@ -158,6 +162,7 @@ class AppRouter:
 
         self.pairing.mark_connected(device_id)
         self.server.register(connection_id, device_id)
+        self.on_peer_change(device_id, True)
 
         missing = self.pairing.missing_models(required)
         ack: dict[str, Any] = {"type": "helloAck", "status": "approved"}
