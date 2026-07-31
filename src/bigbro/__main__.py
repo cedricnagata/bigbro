@@ -64,11 +64,14 @@ def build_parser() -> argparse.ArgumentParser:
     models = sub.add_parser("models", help="manage models").add_subparsers(dest="action", required=True)
     models.add_parser("list", help="list catalog models and their state")
     models.add_parser("check", help="verify every catalog repo id resolves on Hugging Face")
+    # The four verbs name the two axes a model moves along, and they are kept
+    # distinct on purpose: download/delete are about disk, start/stop are about
+    # memory. A 12 GB model on disk costs nothing until it is started.
     for action, help_text in (
         ("download", "fetch a model's weights to disk"),
-        ("run", "load a model into memory"),
+        ("delete", "remove a model's weights from disk"),
+        ("start", "load a downloaded model into memory"),
         ("stop", "unload a model from memory, keeping the download"),
-        ("remove", "delete a model's weights from disk"),
     ):
         node = models.add_parser(action, help=help_text)
         node.add_argument("model", help="catalog id, or 'tts' / 'stt'")
@@ -282,11 +285,13 @@ def cmd_models(args: argparse.Namespace) -> int:
         print(f"error: {reply.get('error')}", file=sys.stderr)
         return 1
 
-    if args.action == "download":
-        print(f"Started downloading {reply['model']} — watch progress with: bigbro models list")
-    else:
-        print(f"{args.action.capitalize()}ped {reply['model']}."
-              if args.action == "stop" else f"{args.action.capitalize()} {reply['model']}: done.")
+    model = reply["model"]
+    print({
+        "download": f"Downloading {model} — watch progress with: bigbro models list",
+        "delete": f"Deleted {model} from disk.",
+        "start": f"Started {model} — it is in memory and ready to answer.",
+        "stop": f"Stopped {model} — the download is still on disk.",
+    }[args.action])
     return 0
 
 

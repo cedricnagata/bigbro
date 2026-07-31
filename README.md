@@ -71,12 +71,12 @@ window, over SSH). Quitting an attached dashboard leaves the daemon serving — 
 | Pane | What it does |
 |---|---|
 | **Devices** | Paired devices with live connection status, and anything awaiting approval |
-| **Models** | The catalog with capabilities and lifecycle state, download progress moving in place |
+| **Models** | The catalog with capabilities and lifecycle state, download progress moving in place. `d`/`s`/`x`/`delete` are the same four verbs as the CLI |
 | **Settings** | Port, keep-awake and log level, persisted to `config.json` |
 | **Log** | The daemon's log, including when attached over the control socket |
 
-`q` quit · `r` refresh · `d` run/stop the selected model (downloads it if it isn't on disk) ·
-`x` remove the selected device or model · `enter` approve a pairing request · `esc` deny it.
+`q` quit · `r` refresh · `d` download · `s` start · `x` stop · `delete` delete the selected model
+or forget the selected device · `enter` approve a pairing request · `esc` deny it.
 
 **Pairing happens here.** When an unknown device connects, a prompt appears on its own — Enter
 approves, Escape denies. No second shell, no `bigbro pair approve`. The CLI commands still work
@@ -97,14 +97,19 @@ bigbro pair remove <id>         # forget a device entirely; it must re-pair with
 bigbro pair remove-all
 
 bigbro models list              # catalog, capabilities and lifecycle state
-bigbro models download <id>
-bigbro models run <id>          # load into memory
+bigbro models download <id>     # fetch the weights to disk
+bigbro models delete <id>       # remove the weights from disk
+bigbro models start <id>        # load into memory, ready to answer
 bigbro models stop <id>         # unload from memory, keep the download
-bigbro models remove <id>       # delete the weights from disk
 bigbro models check             # verify every catalog repo id resolves on Hugging Face
 ```
 
-`models run`, `stop` and `remove` also accept `tts` and `stt` for the speech models.
+Four verbs, two axes: **download / delete** are about disk, **start / stop** are about memory. A
+12 GB model sitting downloaded costs nothing until you start it. `start` downloads first if the
+weights aren't there, and a request for a model that isn't running starts it anyway — the verbs
+just let you pay those costs when you choose to.
+
+`start`, `stop` and `delete` also accept `tts` and `stt` for the speech models.
 
 ### Keeping the Mac awake
 
@@ -309,9 +314,9 @@ gpt-oss-20b. A model can sit downloaded indefinitely at no cost until something 
 | Operation | Effect | Where |
 |---|---|---|
 | **Download** | Fetches weights to disk. Does not use memory. | `bigbro models download`, or automatically when a request needs a model that isn't there |
-| **Run** | Materializes weights into memory so the model can answer | `bigbro models run`, the `run` message, or automatically on first request |
-| **Stop** | Frees the memory, keeps the download | `bigbro models stop`, or the `stop` message |
-| **Remove** | Deletes the weights from disk | `bigbro models remove` only |
+| **Start** | Materializes weights into memory so the model can answer | `bigbro models start`, the `run` wire message, or automatically on first request |
+| **Stop** | Frees the memory, keeps the download | `bigbro models stop`, or the `stop` wire message |
+| **Delete** | Deletes the weights from disk | `bigbro models delete` only |
 
 Removal is deliberately not on the wire. It is destructive and irreversible over a slow download,
 so it belongs to whoever owns the Mac rather than to any paired device. Stopping is fine to

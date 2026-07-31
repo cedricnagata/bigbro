@@ -64,7 +64,7 @@ class StubDaemon:
         if command == "models.list":
             return {"ok": True, "models": self.models,
                     "speech": [{"id": "tts", "name": "Kokoro", "state": "not downloaded"}]}
-        if command in ("models.run", "models.stop", "models.download", "models.remove"):
+        if command in ("models.start", "models.stop", "models.download", "models.delete"):
             return {"ok": True, "model": request.get("model")}
         if command == "settings.get":
             return {"ok": True, "settings": self.settings,
@@ -228,7 +228,7 @@ async def test_a_request_that_arrived_before_the_ui_attached_is_still_prompted(d
 # MARK: - Model actions
 
 
-async def test_toggling_a_running_model_stops_it(daemon):
+async def test_stop_key_stops_the_selected_model(daemon):
     from textual.widgets import DataTable
 
     app = BigBroApp(socket_path=daemon.socket_path)
@@ -239,7 +239,7 @@ async def test_toggling_a_running_model_stops_it(daemon):
         app.query_one("TabbedContent").active = "models"
         await pilot.pause()
         table.move_cursor(row=1)  # gpt-oss-20b, state "running"
-        await pilot.press("d")
+        await pilot.press("x")
 
         assert await _settled(
             pilot, lambda: any(c.get("command") == "models.stop" for c in daemon.calls)
@@ -247,7 +247,7 @@ async def test_toggling_a_running_model_stops_it(daemon):
         assert next(c for c in daemon.calls if c.get("command") == "models.stop")["model"] == "gpt-oss-20b"
 
 
-async def test_toggling_a_model_that_is_not_downloaded_downloads_it(daemon):
+async def test_download_key_downloads_the_selected_model(daemon):
     from textual.widgets import DataTable
 
     app = BigBroApp(socket_path=daemon.socket_path)

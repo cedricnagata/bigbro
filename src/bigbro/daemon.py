@@ -178,9 +178,13 @@ class Daemon:
             "pair.disconnect": self._control_pair_disconnect,
             "models.list": self._control_models_list,
             "models.download": self._control_models_download,
-            "models.run": self._control_models_run,
+            "models.start": self._control_models_start,
+            "models.delete": self._control_models_delete,
+            # The pre-rename names, so a CLI or dashboard from either side of the
+            # change still talks to a daemon from the other.
+            "models.run": self._control_models_start,
             "models.stop": self._control_models_stop,
-            "models.remove": self._control_models_remove,
+            "models.remove": self._control_models_delete,
             "settings.get": self._control_settings_get,
             "settings.set": self._control_settings_set,
         }
@@ -296,7 +300,7 @@ class Daemon:
         asyncio.ensure_future(self.router._download_quietly(model))  # noqa: SLF001
         return {"ok": True, "model": model.id, "started": True}
 
-    async def _control_models_run(self, request: dict[str, Any]) -> dict[str, Any]:
+    async def _control_models_start(self, request: dict[str, Any]) -> dict[str, Any]:
         name, model = self._lookup(request)
         if model is None:
             kinds = {k.value: k for k in ModelKind}
@@ -329,7 +333,7 @@ class Daemon:
         self._publish_model_state(model.id)
         return {"ok": True, "model": model.id}
 
-    async def _control_models_remove(self, request: dict[str, Any]) -> dict[str, Any]:
+    async def _control_models_delete(self, request: dict[str, Any]) -> dict[str, Any]:
         name, model = self._lookup(request)
         if model is None:
             kinds = {k.value: k for k in ModelKind}

@@ -174,12 +174,17 @@ class BigBroApp(App):
     .setting-row { height: auto; margin: 0 0 1 0; }
     """
 
+    # One key per verb rather than one key that guesses. A single toggle has to
+    # infer intent from current state, which silently does the wrong thing the
+    # moment that state is stale — and "delete" guessed wrong costs a re-download.
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
+        Binding("d", "download_model", "Download"),
+        Binding("s", "start_model", "Start"),
+        Binding("x", "stop_model", "Stop"),
+        Binding("delete,backspace", "delete_selected", "Delete"),
         Binding("a", "approve_selected", "Approve", show=False),
-        Binding("x", "remove_selected", "Remove", show=False),
-        Binding("d", "toggle_selected", "Run/Stop", show=False),
     ]
 
     def __init__(self, socket_path=None, owns_daemon: bool = False) -> None:
@@ -501,7 +506,12 @@ class BigBroApp(App):
         if key and key.startswith("pending:"):
             self.resolve_pairing(key.split(":", 1)[1], True)
 
-    async def action_remove_selected(self) -> None:
+    async def action_delete_selected(self) -> None:
+        """Deletes the selected model's weights, or forgets the selected device.
+
+        Both are destructive and irreversible over a slow download, so both
+        confirm first.
+        """
         active = self._dash.query_one(TabbedContent).active
         key = self._selected_key(f"#{active}-table") if active in ("devices", "models") else None
         if not key:
@@ -522,27 +532,43 @@ class BigBroApp(App):
                 ConfirmPrompt(f"Delete {model_id} from disk?", "The download will have to be repeated.")
             )
             if confirmed:
-                await self._call("models.remove", model=model_id)
+                await self._call("models.delete", model=model_id)
                 await self.action_refresh()
 
-    async def action_toggle_selected(self) -> None:
-        """Run a model that isn't running, stop one that is."""
+    def _selected_model(self) -> str | None:
+        """The model id under the cursor, or None if the Models pane isn't showing one."""
         if self._dash.query_one(TabbedContent).active != "models":
-            return
+            return None
         key = self._selected_key("#models-table")
         if not key or not key.startswith("model:"):
+            return None
+        return key.split(":", 1)[1]
+
+    async def action_download_model(self) -> None:
+        model_id = self._selected_model()
+        if model_id is None:
             return
+        await self._call("models.download", model=model_id)
+        await self.action_refresh()
 
-        model_id = key.split(":", 1)[1]
-        current = next((m for m in self._models if m.get("id") == model_id), {})
-        state = str(current.get("state", ""))
+    async def action_start_model(self) -> None:
+        """Loads the weights into memory.
 
-        if state == "running":
-            await self._call("models.stop", model=model_id)
-        elif state == "not downloaded":
-            await self._call("models.download", model=model_id)
-        else:
-            await self._call("models.run", model=model_id)
+        Downloads first if they aren't on disk — the daemon does that anyway when a
+        request needs a model it doesn't have, so refusing here would be a rule the
+        wire protocol doesn't share.
+        """
+        model_id = self._selected_model()
+        if model_id is None:
+            return
+        await self._call("models.start", model=model_id)
+        await self.action_refresh()
+
+    async def action_stop_model(self) -> None:
+        model_id = self._selected_model()
+        if model_id is None:
+            return
+        await self._call("models.stop", model=model_id)
         await self.action_refresh()
 
     # MARK: - Settings edits

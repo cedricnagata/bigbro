@@ -47,7 +47,7 @@ async def test_models_list_covers_the_whole_catalog(daemon):
 
 
 async def test_models_commands_reject_an_unknown_model(daemon):
-    for action in ("models.download", "models.run", "models.stop", "models.remove"):
+    for action in ("models.download", "models.start", "models.stop", "models.delete"):
         reply = await daemon.handle_control({"command": action, "model": "gpt-4"})
         assert reply["ok"] is False, action
         assert "not a model BigBro knows about" in reply["error"]
@@ -120,3 +120,33 @@ async def test_devices_persist_across_daemon_instances(tmp_path, monkeypatch):
     second = Daemon()
     reply = await second.handle_control({"command": "pair.list"})
     assert [d["deviceId"] for d in reply["devices"]] == ["device-1"]
+
+
+# MARK: - The four model verbs
+
+
+@pytest.mark.parametrize("command", [
+    "models.download", "models.delete", "models.start", "models.stop",
+])
+async def test_each_model_verb_is_handled(daemon, command):
+    """download/delete are about disk, start/stop are about memory."""
+    reply = await daemon.handle_control({"command": command, "model": "qwen3-4b"})
+    assert reply["ok"] is True, command
+    assert reply["model"] == "qwen3-4b"
+
+
+@pytest.mark.parametrize("old,new", [("models.run", "models.start"), ("models.remove", "models.delete")])
+async def test_the_pre_rename_control_names_still_resolve(daemon, old, new):
+    """So a CLI and daemon from either side of the rename still understand each other."""
+    assert (await daemon.handle_control({"command": old, "model": "qwen3-4b"}))["ok"] is True
+
+
+async def test_the_verbs_accept_speech_models(daemon):
+    """`tts` and `stt` are addressable by the same verbs as a catalog model.
+
+    Only the local ones are exercised here — `start` would really fetch and load
+    Kokoro, which is not something a test run should do.
+    """
+    for command in ("models.stop", "models.delete"):
+        reply = await daemon.handle_control({"command": command, "model": "tts"})
+        assert reply["ok"] is True, command
