@@ -424,3 +424,41 @@ async def test_verb_keys_type_into_a_settings_field_rather_than_firing(daemon):
 
         fired = [c for c in daemon.calls[before:] if str(c.get("command", "")).startswith("models.")]
         assert fired == []
+
+
+async def test_clicking_a_tab_focuses_its_table(daemon):
+    """The mouse path: a click activates the tab and could leave focus on the bar."""
+    from textual.widgets import DataTable, Tab, TabbedContent
+
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        table = app.query_one("#models-table", DataTable)
+        await _settled(pilot, lambda: table.row_count >= 2)
+
+        await pilot.click(app.query(Tab)[1])  # Models
+        assert await _settled(pilot, lambda: app.query_one(TabbedContent).active == "models")
+        assert await _settled(pilot, lambda: table.has_focus)
+
+        await pilot.press("down")
+        assert await _settled(pilot, lambda: table.cursor_row == 1)
+
+
+async def test_arrowing_along_the_tab_bar_focuses_the_new_table(daemon):
+    """The keyboard path through the tab strip itself, not the number shortcuts."""
+    from textual.widgets import DataTable, TabbedContent
+
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        table = app.query_one("#models-table", DataTable)
+        await _settled(pilot, lambda: table.row_count >= 2)
+
+        await pilot.press("1")
+        await _settled(pilot, lambda: app.query_one("#devices-table", DataTable).has_focus)
+        await pilot.press("shift+tab")   # up to the tab bar
+        await pilot.press("right")       # across to Models
+
+        assert await _settled(pilot, lambda: app.query_one(TabbedContent).active == "models")
+        assert await _settled(pilot, lambda: table.has_focus)
+
+        await pilot.press("down")
+        assert await _settled(pilot, lambda: table.cursor_row == 1)

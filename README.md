@@ -30,11 +30,18 @@ BigBro is not published yet — install it from the repo:
 
 ```sh
 git clone https://github.com/cedricnagata/bigbro
-uv tool install ./bigbro
+uv tool install --editable ./bigbro
 ```
 
 That puts `bigbro` on your PATH with its own interpreter and its own copy of the MLX stack, so
 nothing else on your machine is touched.
+
+`--editable` is deliberate: it links the tool to the working copy, so an edit to the source takes
+effect the next time you run `bigbro` with nothing to reinstall. Without it, `uv tool install
+--force` will happily serve a **cached build** of the previous source — the command reports
+success, the old code keeps running, and the only symptom is a fix that appears not to work. If
+you do want a non-editable install, `uv cache clean bigbro && uv tool install --force --reinstall .`
+is what actually rebuilds.
 
 > **Don't `pip install bigbro`.** The name on PyPI belongs to an unrelated project, so you get
 > someone else's package and no `bigbro` command. A plain `pip install -e .` from this repo does
