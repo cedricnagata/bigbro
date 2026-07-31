@@ -1,20 +1,9 @@
-# Xcode build
-build/
-DerivedData/
-*.xcarchive
-
-# Xcode user-specific
-xcuserdata/
-*.xcuserstate
-*.pbxuser
-!default.pbxuser
-*.mode1v3
-!default.mode1v3
-*.mode2v3
-!default.mode2v3
-*.perspectivev3
-!default.perspectivev3
-*.xcscmblueprint
-
-# macOS
 .DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/

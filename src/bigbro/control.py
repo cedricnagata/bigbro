@@ -1,0 +1,100 @@
+"""The Unix socket the non-`serve` CLI verbs talk to.
+
+`bigbro pair approve` has to reach the running daemon: only that process holds the
+parked connection waiting on a decision. A Unix socket in the support directory keeps
+that conversation off the network entirely — filesystem permissions are the whole
+access control story, and nothing about pairing should ever be reachable from the
+LAN the daemon is advertising on.
+
+Reuses the peer protocol's framing so there is one codec rather than two that drift.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import os
+from pathlib import Path
+from typing import Any, Awaitable, Callable
+
+from .config import control_socket_path
+from .protocol.framing import read_frame, write_frame
+
+log = logging.getLogger("bigbro.control")
+
+Handler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+
+
+class ControlServer:
+    """Serves control commands to `bigbro` CLI invocations."""
+
+    def __init__(self, handler: Handler, path: Path | None = None) -> None:
+        self._handler = handler
+        self._path = path or control_socket_path()
+        self._server: asyncio.Server | None = None
+
+    async def start(self) -> None:
+        # A socket left behind by a crashed daemon would make bind fail; nothing else
+        # owns this path, so clearing it is safe.
+        with contextlib.suppress(FileNotFoundError):
+            self._path.unlink()
+
+        self._server = await asyncio.start_unix_server(self._serve, path=str(self._path))
+        # Owner-only: anyone who can write here can approve a device.
+        os.chmod(self._path, 0o600)
+        log.info("control socket at %s", self._path)
+
+    async def stop(self) -> None:
+        if self._server is not None:
+            self._server.close()
+            with contextlib.suppress(Exception):
+                await self._server.wait_closed()
+            self._server = None
+        with contextlib.suppress(FileNotFoundError):
+            self._path.unlink()
+
+    async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            request = await read_frame(reader)
+            if request is None:
+                return
+            try:
+                response = await self._handler(request)
+            except Exception as exc:
+                log.exception("control command failed")
+                response = {"ok": False, "error": str(exc)}
+            await write_frame(writer, response)
+        except (ConnectionError, ValueError) as exc:
+            log.warning("control connection failed: %s", exc)
+        finally:
+            with contextlib.suppress(Exception):
+                writer.close()
+                await writer.wait_closed()
+
+
+class ControlClientError(Exception):
+    pass
+
+
+async def send_command(command: dict[str, Any], path: Path | None = None) -> dict[str, Any]:
+    """Sends one command to a running daemon and returns its reply."""
+    socket_path = path or control_socket_path()
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(socket_path))
+    except (FileNotFoundError, ConnectionRefusedError) as exc:
+        raise ControlClientError(
+            f"No running daemon found at {socket_path}. Start one with: bigbro serve"
+        ) from exc
+
+    try:
+        await write_frame(writer, command)
+        response = await read_frame(reader)
+    finally:
+        with contextlib.suppress(Exception):
+            writer.close()
+            await writer.wait_closed()
+
+    if response is None:
+        raise ControlClientError("Daemon closed the connection without replying.")
+    return response

@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bigbro"
+version = "2.0.0"
+description = "Turn your Mac into a local AI inference server for nearby iOS devices"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Cedric Nagata" }]
+keywords = ["mlx", "apple-silicon", "llm", "inference", "bonjour"]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# The MLX stack is Apple-silicon only and has no Linux wheels. Marking it keeps
+# `pip install -e .` working on other platforms for the parts that are pure Python —
+# the parsers, catalog, framing and pairing logic all have real tests that do not
+# need a GPU. `bigbro serve` still refuses to start off macOS (see daemon.py).
+dependencies = [
+    "huggingface-hub>=0.27",
+    "numpy>=1.26",
+    "mlx-lm>=0.28; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx-vlm>=0.3; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx-audio>=0.4.6; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[project.scripts]
+bigbro = "bigbro.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/cedricnagata/bigbro"
+Client = "https://github.com/cedricnagata/bigbro-kit"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bigbro"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

@@ -1,0 +1,122 @@
+"""Control-command tests — the backend for every CLI verb except `serve`.
+
+The Daemon object is constructed without ever starting the listener, Bonjour or the
+power assertion, so these run anywhere. `BIGBRO_HOME` keeps them off the real
+support directory.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from bigbro.daemon import Daemon
+
+
+@pytest.fixture
+def daemon(tmp_path, monkeypatch):
+    monkeypatch.setenv("BIGBRO_HOME", str(tmp_path))
+    return Daemon(port=8765)
+
+
+async def test_unknown_command_is_rejected(daemon):
+    reply = await daemon.handle_control({"command": "nope"})
+    assert reply["ok"] is False
+    assert "unknown command" in reply["error"]
+
+
+async def test_status_reports_the_daemon_shape(daemon):
+    reply = await daemon.handle_control({"command": "status"})
+    assert reply["ok"] is True
+    assert reply["port"] == 8765
+    assert reply["paired"] == 0
+    assert reply["connected"] == []
+    assert set(reply["speech"]) == {"tts", "stt"}
+
+
+async def test_models_list_covers_the_whole_catalog(daemon):
+    from bigbro.inference.catalog import ALL_MODELS
+
+    reply = await daemon.handle_control({"command": "models.list"})
+    assert reply["ok"] is True
+    assert len(reply["models"]) == len(ALL_MODELS)
+
+    entry = next(m for m in reply["models"] if m["id"] == "gpt-oss-20b")
+    assert entry["tools"] is True
+    assert entry["reasoning"] == "harmony"
+    assert entry["state"] == "not downloaded"
+
+
+async def test_models_commands_reject_an_unknown_model(daemon):
+    for action in ("models.download", "models.run", "models.stop", "models.remove"):
+        reply = await daemon.handle_control({"command": action, "model": "gpt-4"})
+        assert reply["ok"] is False, action
+        assert "not a model BigBro knows about" in reply["error"]
+
+
+async def test_models_stop_accepts_an_ollama_style_tag(daemon):
+    """Older clients and muscle memory both write `gpt-oss:20b`."""
+    reply = await daemon.handle_control({"command": "models.stop", "model": "gpt-oss:20b"})
+    assert reply["ok"] is True
+    assert reply["model"] == "gpt-oss-20b"
+
+
+async def test_models_stop_is_idempotent(daemon):
+    """"Stop what isn't started" is the state the caller wanted, not an error."""
+    first = await daemon.handle_control({"command": "models.stop", "model": "qwen3-4b"})
+    second = await daemon.handle_control({"command": "models.stop", "model": "qwen3-4b"})
+    assert first["ok"] and second["ok"]
+
+
+async def test_pair_list_is_empty_on_a_fresh_install(daemon):
+    reply = await daemon.handle_control({"command": "pair.list"})
+    assert reply == {"ok": True, "pending": [], "devices": []}
+
+
+async def test_pair_approve_with_nothing_pending(daemon):
+    reply = await daemon.handle_control({"command": "pair.approve", "deviceId": "nobody"})
+    assert reply["ok"] is False
+    assert "no pending request" in reply["error"]
+
+
+async def test_pair_approve_with_no_device_id(daemon):
+    reply = await daemon.handle_control({"command": "pair.approve", "deviceId": ""})
+    assert reply["ok"] is False
+
+
+async def test_pair_remove_reports_an_unmatched_prefix(daemon):
+    reply = await daemon.handle_control({"command": "pair.remove", "deviceId": "ghost"})
+    assert reply["ok"] is False
+    assert "no paired device" in reply["error"]
+
+
+async def test_pair_list_then_remove(daemon):
+    daemon.pairing.approve("device-abc123", "iPhone", "TestApp", ["qwen3-4b"])
+
+    listed = await daemon.handle_control({"command": "pair.list"})
+    assert len(listed["devices"]) == 1
+    assert listed["devices"][0]["name"] == "iPhone"
+    assert listed["devices"][0]["connected"] is False
+
+    removed = await daemon.handle_control({"command": "pair.remove", "deviceId": "device-abc"})
+    assert removed["ok"] is True
+    assert removed["deviceId"] == "device-abc123"
+
+    after = await daemon.handle_control({"command": "pair.list"})
+    assert after["devices"] == []
+
+
+async def test_pair_remove_all(daemon):
+    daemon.pairing.approve("a", "A", "App", [])
+    daemon.pairing.approve("b", "B", "App", [])
+    reply = await daemon.handle_control({"command": "pair.remove-all"})
+    assert reply == {"ok": True, "removed": 2}
+
+
+async def test_devices_persist_across_daemon_instances(tmp_path, monkeypatch):
+    monkeypatch.setenv("BIGBRO_HOME", str(tmp_path))
+    first = Daemon()
+    first.pairing.approve("device-1", "iPhone", "TestApp", [])
+
+    second = Daemon()
+    reply = await second.handle_control({"command": "pair.list"})
+    assert [d["deviceId"] for d in reply["devices"]] == ["device-1"]
