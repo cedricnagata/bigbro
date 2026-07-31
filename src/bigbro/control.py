@@ -25,6 +25,9 @@ log = logging.getLogger("bigbro.control")
 
 Handler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
+#: `sun_path` is 104 bytes on Darwin, 108 on Linux. Take the smaller.
+_MAX_UNIX_PATH = 104
+
 
 class ControlServer:
     """Serves control commands to `bigbro` CLI invocations."""
@@ -35,6 +38,17 @@ class ControlServer:
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
+        # macOS caps a Unix socket path at 104 bytes and reports the overflow as a
+        # bare "AF_UNIX path too long", which says nothing about which path or why.
+        # Only reachable via a deep BIGBRO_HOME, but that is exactly the case where
+        # the cause is least obvious.
+        encoded = str(self._path).encode()
+        if len(encoded) >= _MAX_UNIX_PATH:
+            raise OSError(
+                f"Control socket path is {len(encoded)} bytes, over the {_MAX_UNIX_PATH}-byte "
+                f"limit for Unix sockets: {self._path}. Set BIGBRO_HOME to a shorter directory."
+            )
+
         # A socket left behind by a crashed daemon would make bind fail; nothing else
         # owns this path, so clearing it is safe.
         with contextlib.suppress(FileNotFoundError):

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import struct
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -218,60 +219,83 @@ def test_hub_repository_root_identifies_a_snapshot(tmp_path):
 ])
 def test_hub_repository_root_refuses_to_guess(path, tmp_path):
     """A path this cannot positively identify is not one to delete the parents of."""
-    from pathlib import Path
     assert hub_repository_root(Path(path)) is None
 
 
 # MARK: - Control socket
 
 
-async def test_control_socket_round_trip(tmp_path):
+@pytest.fixture
+def socket_dir():
+    """A short-pathed temp directory for Unix sockets.
+
+    pytest's `tmp_path` lives under `/private/var/folders/...` on macOS, which
+    overruns the 104-byte `sun_path` limit before a socket name is even appended.
+    """
+    import shutil
+    import tempfile
+
+    directory = Path(tempfile.mkdtemp(dir="/tmp"))
+    try:
+        yield directory
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+async def test_control_socket_round_trip(socket_dir):
     async def handler(request):
         return {"ok": True, "echo": request.get("command")}
 
-    server = ControlServer(handler, tmp_path / "control.sock")
+    server = ControlServer(handler, socket_dir / "control.sock")
     await server.start()
     try:
-        reply = await send_command({"command": "status"}, tmp_path / "control.sock")
+        reply = await send_command({"command": "status"}, socket_dir / "control.sock")
         assert reply == {"ok": True, "echo": "status"}
     finally:
         await server.stop()
 
 
-async def test_control_socket_reports_handler_errors_instead_of_hanging(tmp_path):
+async def test_control_socket_reports_handler_errors_instead_of_hanging(socket_dir):
     async def handler(_request):
         raise RuntimeError("boom")
 
-    server = ControlServer(handler, tmp_path / "control.sock")
+    server = ControlServer(handler, socket_dir / "control.sock")
     await server.start()
     try:
-        reply = await send_command({"command": "x"}, tmp_path / "control.sock")
+        reply = await send_command({"command": "x"}, socket_dir / "control.sock")
         assert reply["ok"] is False
         assert "boom" in reply["error"]
     finally:
         await server.stop()
 
 
-async def test_control_client_says_how_to_start_the_daemon(tmp_path):
+async def test_control_client_says_how_to_start_the_daemon(socket_dir):
     with pytest.raises(ControlClientError, match="bigbro serve"):
-        await send_command({"command": "status"}, tmp_path / "nonexistent.sock")
+        await send_command({"command": "status"}, socket_dir / "nonexistent.sock")
 
 
-async def test_control_socket_is_owner_only(tmp_path):
+async def test_control_socket_is_owner_only(socket_dir):
     """Anyone who can write here can approve a device onto the inference server."""
-    server = ControlServer(lambda _r: asyncio.sleep(0, {"ok": True}), tmp_path / "control.sock")
+    server = ControlServer(lambda _r: asyncio.sleep(0, {"ok": True}), socket_dir / "control.sock")
     await server.start()
     try:
-        assert (tmp_path / "control.sock").stat().st_mode & 0o777 == 0o600
+        assert (socket_dir / "control.sock").stat().st_mode & 0o777 == 0o600
     finally:
         await server.stop()
 
 
-async def test_control_socket_replaces_a_stale_file(tmp_path):
+async def test_control_socket_replaces_a_stale_file(socket_dir):
     """A socket left by a crashed daemon must not block the next start."""
-    path = tmp_path / "control.sock"
+    path = socket_dir / "control.sock"
     path.write_text("stale")
 
     server = ControlServer(lambda _r: asyncio.sleep(0, {"ok": True}), path)
     await server.start()
     await server.stop()
+
+
+async def test_oversized_socket_path_explains_itself(tmp_path):
+    """macOS reports the overflow as a bare "AF_UNIX path too long"."""
+    deep = tmp_path / ("d" * 60) / ("e" * 60) / "control.sock"
+    with pytest.raises(OSError, match="BIGBRO_HOME"):
+        await ControlServer(lambda _r: None, deep).start()

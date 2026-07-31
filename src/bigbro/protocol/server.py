@@ -50,9 +50,21 @@ class PeerServer:
 
     # MARK: - Lifecycle
 
-    async def start(self, port: int, host: str = "0.0.0.0") -> None:
+    async def start(self, port: int, host: str | None = None) -> None:
+        """Binds the listener. `host=None` means every interface, both address families.
+
+        Dual-stack matters here rather than being a nicety: mDNSResponder advertises
+        this Mac's `.local` name with its IPv6 addresses alongside its IPv4 one, and
+        `NetService` resolution on iOS may hand the client either. Binding
+        `0.0.0.0` would leave a device that resolved to IPv6 discovering the service
+        and then failing to connect to it — which is what `NWListener` did for free
+        in the Swift original.
+        """
         self._server = await asyncio.start_server(self._accept, host, port)
-        log.info("listening on %s:%d", host, port)
+        bound = ", ".join(
+            sorted({f"{s.getsockname()[0]}:{s.getsockname()[1]}" for s in self._server.sockets or []})
+        )
+        log.info("listening on %s", bound or f"{host}:{port}")
 
     async def shutdown(self) -> None:
         """Sends `bye` to every peer, then stops. Use for graceful shutdown."""
