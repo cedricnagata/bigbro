@@ -21,6 +21,7 @@ from .events import EventBus
 from .inference import catalog
 from .inference.downloader import ModelDownloader, Progress
 from .inference.engine import MLXEngine
+from .macos import memory as memory_probe
 from .macos.bonjour import BonjourAdvertiser, computer_name
 from .macos.power import PowerAssertion
 from .protocol.pairing import PairingManager
@@ -209,6 +210,7 @@ class Daemon:
             "speech": {
                 kind.value: self.speech.state_description(kind) for kind in ModelKind
             },
+            "memory": memory_probe.report(self.engine.memory_by_model).to_wire(),
         }
 
     async def _control_pair_list(self, _request: dict[str, Any]) -> dict[str, Any]:

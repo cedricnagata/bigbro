@@ -36,6 +36,7 @@ from textual.widgets import (
 )
 
 from .control import ControlClientError, send_command, subscribe
+from .macos.memory import human
 
 #: How often to re-sync authoritative state. Events drive the UI between these;
 #: this only repairs drift after a dropped subscription or a missed event.
@@ -275,7 +276,7 @@ class BigBroApp(App):
         devices.add_columns("", "device", "app", "id", "models")
 
         models = self._dash.query_one("#models-table", DataTable)
-        models.add_columns("model", "size", "caps", "state")
+        models.add_columns("model", "size", "caps", "state", "memory")
 
         self.listen_for_events()
         await self.action_refresh()
@@ -475,6 +476,14 @@ class BigBroApp(App):
             f"{connected}/{paired} connected  ·  "
             f"{len(running)} model(s) running"
         )
+        mem = self._status.get("memory") or {}
+        if mem.get("resident") is not None:
+            share = (
+                f" ({mem['resident'] / mem['total'] * 100:.0f}%)" if mem.get("total") else ""
+            )
+            bar += f"  ·  {human(mem['resident'])}{share}"
+            if mem.get("pressure") and mem["pressure"] != "normal":
+                bar += f" pressure {mem['pressure']}"
         bar_widget = self._find("#status-bar", Static)
         if bar_widget is not None:
             bar_widget.update(bar)
@@ -523,11 +532,13 @@ class BigBroApp(App):
                 "I" if model.get("images") else "-",
                 "R" if model.get("reasoning", "none") != "none" else "-",
             ])
+            held = (self._status.get("memory") or {}).get("models", {}).get(model.get("id"))
             table.add_row(
                 model.get("id", "?"),
                 f"{size:.1f}G" if isinstance(size, (int, float)) else "-",
                 caps,
                 model.get("state", "?"),
+                human(held) if held else "-",
                 key=f"model:{model.get('id')}",
             )
 

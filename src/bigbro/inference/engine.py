@@ -30,6 +30,20 @@ log = logging.getLogger("bigbro.engine")
 _DONE = object()
 
 
+def _mlx_active_memory() -> int:
+    """Bytes MLX currently has allocated, or 0 if it isn't loaded yet."""
+    import sys
+
+    module = sys.modules.get("mlx.core")
+    reader = getattr(module, "get_active_memory", None) if module else None
+    if reader is None:
+        return 0
+    try:
+        return int(reader())
+    except Exception:  # pragma: no cover - depends on the MLX build
+        return 0
+
+
 class InferenceError(Exception):
     """Anything the client should see as an `error` message rather than a crash."""
 
@@ -93,10 +107,15 @@ class MLXEngine:
         self._loaded: dict[str, Any] = {}                       # id → (model, processor)
         self._load_tasks: dict[str, asyncio.Task] = {}
         self._errors: dict[str, str] = {}
+        #: Catalog id → bytes its weights added, measured at load time.
+        self._memory: dict[str, int] = {}
         # MLX generation is not safe to run concurrently — Metal command buffers and
         # the model's own KV cache are shared mutable state. Swift got this for free
         # from actor isolation on ModelContainer; here it has to be explicit.
         self._generation_lock = asyncio.Lock()
+        # Held across a weight materialization so per-model memory can be
+        # attributed, and so two large loads do not peak against each other.
+        self._load_lock = asyncio.Lock()
 
     # MARK: - State
 
@@ -160,7 +179,17 @@ class MLXEngine:
             # later deletes.
             await self.downloader.download(model)
             log.info("loading %s (%s)", model.display_name, model.repo)
-            loaded = await asyncio.to_thread(self._load_blocking, model)
+
+            # Serialized so the before/after reading below attributes the growth to
+            # this model alone. Two loads racing would each be charged the other's
+            # weights, and a 12 GB model is not a figure to report wrongly. It also
+            # keeps two large materializations from peaking against each other.
+            async with self._load_lock:
+                before = _mlx_active_memory()
+                loaded = await asyncio.to_thread(self._load_blocking, model)
+                grew = _mlx_active_memory() - before
+                if grew > 0:
+                    self._memory[model.id] = grew
         except Exception as exc:
             self._errors[model.id] = str(exc)
             log.error("failed to load %s: %s", model.id, exc)
@@ -168,8 +197,22 @@ class MLXEngine:
 
         self._loaded[model.id] = loaded
         self._errors.pop(model.id, None)
-        log.info("%s is running", model.display_name)
+        log.info(
+            "%s is running%s",
+            model.display_name,
+            f" ({self._memory[model.id] / 1024**3:.1f} GB)" if model.id in self._memory else "",
+        )
         return loaded
+
+    @property
+    def memory_by_model(self) -> dict[str, int]:
+        """Bytes each running model added when its weights were materialized.
+
+        Measured rather than taken from the catalog's approximate size: quantized
+        weights vary between revisions, and what matters is what this Mac is
+        actually holding right now.
+        """
+        return {model_id: size for model_id, size in self._memory.items() if model_id in self._loaded}
 
     @staticmethod
     def _load_blocking(model: BigBroModel):
@@ -188,6 +231,7 @@ class MLXEngine:
         if self._loaded.pop(model_id, None) is None:
             return
         self._errors.pop(model_id, None)
+        self._memory.pop(model_id, None)
         log.info("stopped %s", model_id)
         # Reclaim what the model was holding. MLX caches buffers between requests, and
         # those survive the model object going away unless the cache is cleared.

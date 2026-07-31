@@ -82,6 +82,9 @@ window, over SSH). Quitting an attached dashboard leaves the daemon serving — 
 | **Settings** | Port, keep-awake and log level, persisted to `config.json` |
 | **Log** | The daemon's log, including when attached over the control socket |
 
+The status bar carries the daemon's memory footprint and its share of installed RAM, and the
+Models pane shows what each resident model is actually costing.
+
 `q` quit · `r` refresh · `d` download · `s` start · `x` stop · `delete` delete the selected model
 or forget the selected device · `enter` approve a pairing request · `esc` deny it.
 
@@ -124,6 +127,32 @@ weights aren't there, and a request for a model that isn't running starts it any
 just let you pay those costs when you choose to.
 
 `start`, `stop` and `delete` also accept `tts` and `stt` for the speech models.
+
+### Memory
+
+`bigbro status` and the dashboard both report what the daemon is holding:
+
+```
+  memory:      12.8 GB of 36.0 GB (35%)
+    weights:   12.0 GB active, 300.0 MB cached, 12.4 GB peak
+    gpt-oss-20b          12.0 GB
+```
+
+Three different numbers, answering three different questions:
+
+- **memory** — the process's resident size, what the Mac has actually given bigbro, against
+  installed RAM. macOS's own pressure verdict is appended when it stops being `normal`; it is
+  reported rather than derived from free pages, because with compression and a dynamic file cache
+  "free" means very little.
+- **weights** — MLX's own accounting. `active` is what it is deliberately holding, `cache` is
+  buffers it keeps between requests, `peak` is the high-water mark. When the gap between the
+  process figure and `active` grows, that gap is cache and activations.
+- **per-model** — measured, not taken from the catalog's approximate size, by reading MLX's
+  allocation before and after each model's weights are materialized. Quantized weights vary between
+  revisions, and what matters is what this Mac is holding right now. Loads are serialized so two
+  models racing cannot be charged each other's weights.
+
+A stopped model drops out of the per-model list immediately — it is no longer being held.
 
 ### Keeping the Mac awake
 
@@ -417,6 +446,7 @@ src/bigbro/
 ├── speech.py               — Kokoro TTS + Parakeet STT via mlx-audio
 ├── macos/
 │   ├── bonjour.py          — DNSServiceRegister via ctypes (_bigbro._tcp.)
+│   ├── memory.py           — process/system memory via mach task_info and sysctl
 │   └── power.py            — IOPMAssertionCreateWithName via ctypes
 ├── protocol/
 │   ├── framing.py          — the 4-byte length prefix codec
