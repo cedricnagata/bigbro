@@ -26,12 +26,23 @@ run separately. Your Mac downloads the models itself, on first use or from the C
 
 ## Installation
 
+BigBro is not on PyPI — the name `bigbro` there belongs to an unrelated project, so
+`pip install bigbro` fetches someone else's package and gives you no `bigbro` command. Install
+from the repo instead:
+
 ```sh
-uv tool install bigbro
+git clone https://github.com/cedricnagata/bigbro
+uv tool install ./bigbro
 ```
 
-`uv` vendors its own interpreter, so this does not touch your system Python. `pipx install bigbro`
-and `pip install bigbro` work too.
+`uv` puts the daemon and its dependencies in their own environment with their own interpreter, so
+the MLX stack cannot disturb anything else you have installed. `pipx install ./bigbro` does the
+same.
+
+Plain `pip install -e .` works and puts `bigbro` on your PATH, but installs into whichever Python
+is active — and the MLX stack pulls recent `transformers`, `huggingface-hub`, `pydantic` and
+`fastapi`, which will upgrade those for every other project sharing that interpreter. Prefer `uv`
+or `pipx` unless you are deliberately installing into a virtualenv of your own.
 
 ## Usage
 
