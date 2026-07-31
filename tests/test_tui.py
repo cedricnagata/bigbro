@@ -343,3 +343,84 @@ async def test_a_rejected_setting_is_reported(daemon):
         )
         # The field is put back to what the daemon actually has.
         assert await _settled(pilot, lambda: app.query_one("#set-port", Input).value == "8765")
+
+
+# MARK: - Keyboard navigation
+
+
+async def test_the_table_takes_focus_so_arrow_keys_reach_it(daemon):
+    """Activating a tab leaves focus on the tab bar, which freezes the selection."""
+    from textual.widgets import DataTable
+
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        table = app.query_one("#models-table", DataTable)
+        await _settled(pilot, lambda: table.row_count >= 2)
+
+        await pilot.press("2")  # Models
+        assert await _settled(pilot, lambda: table.has_focus)
+
+        await pilot.press("down")
+        assert await _settled(pilot, lambda: table.cursor_row == 1)
+        await pilot.press("down")
+        assert await _settled(pilot, lambda: table.cursor_row == 2)
+        await pilot.press("up")
+        assert await _settled(pilot, lambda: table.cursor_row == 1)
+
+
+async def test_devices_table_is_focused_on_startup(daemon):
+    from textual.widgets import DataTable
+
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        await _settled(pilot, lambda: "status" in daemon.commands())
+        assert await _settled(pilot, lambda: app.query_one("#devices-table", DataTable).has_focus)
+
+
+@pytest.mark.parametrize("key,pane", [("1", "devices"), ("2", "models"), ("3", "settings"), ("4", "log")])
+async def test_number_keys_switch_panes(daemon, key, pane):
+    from textual.widgets import TabbedContent
+
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        await _settled(pilot, lambda: "status" in daemon.commands())
+        await pilot.press(key)
+        assert await _settled(pilot, lambda: app.query_one(TabbedContent).active == pane)
+
+
+async def test_a_refresh_does_not_move_the_cursor_or_steal_focus(daemon):
+    """Refreshes land every 5s; one that resets the selection makes the list unusable."""
+    from textual.widgets import DataTable
+
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        table = app.query_one("#models-table", DataTable)
+        await _settled(pilot, lambda: table.row_count >= 2)
+        await pilot.press("2")
+        await _settled(pilot, lambda: table.has_focus)
+        await pilot.press("down")
+        await _settled(pilot, lambda: table.cursor_row == 1)
+
+        await app.action_refresh()
+        await pilot.pause()
+
+        assert table.cursor_row == 1
+        assert table.has_focus
+
+
+async def test_verb_keys_type_into_a_settings_field_rather_than_firing(daemon):
+    """`d`/`s`/`x` are model verbs, but in a text field they are just characters."""
+    from textual.widgets import Input
+
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        await _settled(pilot, lambda: app.query_one("#set-port", Input).value == "8765")
+        await pilot.press("3")  # Settings
+        assert await _settled(pilot, lambda: app.query_one("#set-port", Input).has_focus)
+
+        before = len(daemon.calls)
+        await pilot.press("d", "s", "x")
+        await pilot.pause()
+
+        fired = [c for c in daemon.calls[before:] if str(c.get("command", "")).startswith("models.")]
+        assert fired == []

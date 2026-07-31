@@ -21,6 +21,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
+from textual.widget import Widget
 from textual.widgets import (
     Button,
     DataTable,
@@ -185,7 +186,24 @@ class BigBroApp(App):
         Binding("x", "stop_model", "Stop"),
         Binding("delete,backspace", "delete_selected", "Delete"),
         Binding("a", "approve_selected", "Approve", show=False),
+        # Switching panes from anywhere. Without these the only way back to the tab
+        # bar is focus cycling, which is not obvious when the cursor is in a table.
+        Binding("1", "show_pane('devices')", "Devices", show=False),
+        Binding("2", "show_pane('models')", "Models", show=False),
+        Binding("3", "show_pane('settings')", "Settings", show=False),
+        Binding("4", "show_pane('log')", "Log", show=False),
+        Binding("tab", "next_pane", "Next pane", show=False),
     ]
+
+    #: What takes focus when each pane is shown. Activating a tab leaves focus on
+    #: the tab bar, so without this the arrow keys never reach the table the user
+    #: is looking at and the selection appears frozen.
+    PANE_FOCUS = {
+        "devices": "#devices-table",
+        "models": "#models-table",
+        "settings": "#set-port",
+        "log": "#log-view",
+    }
 
     def __init__(self, socket_path=None, owns_daemon: bool = False) -> None:
         super().__init__()
@@ -236,6 +254,41 @@ class BigBroApp(App):
         self.listen_for_events()
         await self.action_refresh()
         self.set_interval(REFRESH_SECONDS, self.action_refresh)
+        self._focus_active_pane()
+
+    # MARK: - Pane focus
+
+    def _focus_active_pane(self) -> None:
+        """Puts the cursor where the user is looking."""
+        try:
+            active = self._dash.query_one(TabbedContent).active
+        except Exception:
+            return
+        selector = self.PANE_FOCUS.get(active)
+        if selector is None:
+            return
+        widget = self._find(selector, Widget)
+        if widget is not None and widget.focusable:
+            widget.focus()
+
+    @on(TabbedContent.TabActivated)
+    def _pane_activated(self, _event: TabbedContent.TabActivated) -> None:
+        self._focus_active_pane()
+
+    def action_show_pane(self, pane: str) -> None:
+        tabs = self._find("TabbedContent", TabbedContent)
+        if tabs is not None:
+            tabs.active = pane
+            self._focus_active_pane()
+
+    def action_next_pane(self) -> None:
+        order = list(self.PANE_FOCUS)
+        tabs = self._find("TabbedContent", TabbedContent)
+        if tabs is None:
+            return
+        current = order.index(tabs.active) if tabs.active in order else 0
+        tabs.active = order[(current + 1) % len(order)]
+        self._focus_active_pane()
 
     def _find(self, selector: str, kind):
         """A dashboard widget, or None if it isn't there.

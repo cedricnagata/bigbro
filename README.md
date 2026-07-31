@@ -78,6 +78,9 @@ window, over SSH). Quitting an attached dashboard leaves the daemon serving — 
 `q` quit · `r` refresh · `d` download · `s` start · `x` stop · `delete` delete the selected model
 or forget the selected device · `enter` approve a pairing request · `esc` deny it.
 
+Move between panes with `1`–`4` or `tab`; the pane's table takes focus when it opens, so the arrow
+keys move the selection straight away.
+
 **Pairing happens here.** When an unknown device connects, a prompt appears on its own — Enter
 approves, Escape denies. No second shell, no `bigbro pair approve`. The CLI commands still work
 and are still what you want under launchd; the dashboard is a client of exactly the same control
