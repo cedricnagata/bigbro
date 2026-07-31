@@ -142,12 +142,99 @@ final class SpeechEngine: ObservableObject, BackendStatusReporting {
 
     // MARK: - Lifecycle
 
-    /// A directory BigBro owns for this model's weights, rather than trusting FluidAudio's
-    /// default cache layout — the same discipline `MLXEngine` uses (record only a path this
-    /// app controls), so `remove` can delete exactly this and nothing else.
-    private static func directory(for kind: ModelKind) -> URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BigBro/Speech/\(kind.rawValue)", isDirectory: true)
+    private static let sttVersion: AsrModelVersion = .v3
+
+    /// Where a model's weights live. These are FluidAudio's own default locations rather than
+    /// BigBro-named ones, and that is deliberate: neither model honours a directory override
+    /// end to end.
+    ///
+    /// `TtsModels.download(directory:)` respects an override, but the Kokoro *asset* loaders do
+    /// not — lexicons, voice embeddings, and the G2P encoder/decoder that pronounces words
+    /// outside the lexicon all read `TtsModels.cacheDirectoryURL()` unconditionally. Overriding
+    /// splits the model set in two, and synthesis then fails with "G2P models unavailable but
+    /// required for OOV words" on any sentence containing an unusual word, while ordinary text
+    /// works. `AsrModels` has a subtler version of the same contract: it resolves the *sibling*
+    /// of the directory it is given, named after the repo, so only a path already in that shape
+    /// round-trips.
+    ///
+    /// Under the App Sandbox both resolve inside BigBro's own container, so this is still a
+    /// location only this app writes to and `remove` can delete precisely.
+    private static func directory(for kind: ModelKind) throws -> URL {
+        switch kind {
+        case .tts: return try TtsModels.cacheDirectoryURL()
+        case .stt: return AsrModels.defaultCacheDirectory(for: sttVersion)
+        }
+    }
+
+    /// Exactly what `remove` deletes. For TTS that is the `Models/kokoro` subtree rather than
+    /// the cache root `directory(for:)` returns, so nothing else FluidAudio caches alongside it
+    /// is destroyed too.
+    private static func contentDirectory(for kind: ModelKind) throws -> URL {
+        switch kind {
+        case .tts: return try directory(for: .tts).appendingPathComponent("Models/kokoro", isDirectory: true)
+        case .stt: return try directory(for: .stt)
+        }
+    }
+
+    /// Moves weights an earlier build downloaded to `BigBro/Speech` into the locations above.
+    /// Worth the code because the payload is ~900 MB and the move is a rename inside one
+    /// container — without it every existing install silently re-downloads both models.
+    private static func migrateLegacyDownloads() {
+        let fm = FileManager.default
+        let legacyRoot = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("BigBro/Speech", isDirectory: true)
+        guard fm.fileExists(atPath: legacyRoot.path) else { return }
+
+        /// Merges rather than renames, because the destination is usually already half-populated:
+        /// the lexicon and voice embeddings always landed in FluidAudio's own cache even when the
+        /// models did not, so a plain `moveItem` would refuse and every install would re-download.
+        /// Where both sides have a file the destination wins and the legacy copy is dropped — the
+        /// two came from the same HuggingFace repo, and keeping it would just orphan the bytes.
+        /// Returns whether the source was left empty.
+        func adopt(_ source: URL, into destination: URL) -> Bool {
+            guard let items = try? fm.contentsOfDirectory(atPath: source.path) else { return true }
+            do {
+                try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+            } catch {
+                print("[SpeechEngine] could not prepare \(destination.path): \(error.localizedDescription)")
+                return false
+            }
+            for item in items {
+                let from = source.appendingPathComponent(item)
+                let to = destination.appendingPathComponent(item)
+                do {
+                    if fm.fileExists(atPath: to.path) {
+                        try fm.removeItem(at: from)
+                    } else {
+                        try fm.moveItem(at: from, to: to)
+                    }
+                } catch {
+                    print("[SpeechEngine] could not migrate \(item): \(error.localizedDescription)")
+                }
+            }
+            let emptied = (try? fm.contentsOfDirectory(atPath: source.path))?.isEmpty ?? false
+            if emptied {
+                try? fm.removeItem(at: source)
+                print("[SpeechEngine] migrated \(items.count) item(s) to \(destination.path)")
+            }
+            return emptied
+        }
+
+        var complete = true
+        if let tts = try? contentDirectory(for: .tts) {
+            complete = adopt(legacyRoot.appendingPathComponent("tts/Models/kokoro", isDirectory: true), into: tts)
+                && complete
+        }
+        if let stt = try? contentDirectory(for: .stt) {
+            complete = adopt(legacyRoot.appendingPathComponent(stt.lastPathComponent, isDirectory: true), into: stt)
+                && complete
+        }
+
+        // Only discard the old tree once nothing of value is left in it. A failed move leaves the
+        // weights where they are and `download` re-fetches them next launch — deleting here
+        // regardless would turn a recoverable failure into a forced 900 MB re-download.
+        guard complete else { return }
+        try? fm.removeItem(at: legacyRoot)
     }
 
     /// Fetches a model's weights to `directory(for:)` without starting it.
@@ -159,7 +246,8 @@ final class SpeechEngine: ObservableObject, BackendStatusReporting {
         let task = Task<Void, Error> { [weak self] in
             guard let self else { throw CancellationError() }
             do {
-                let dir = Self.directory(for: kind)
+                Self.migrateLegacyDownloads()
+                let dir = try Self.directory(for: kind)
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                 let progressHandler: DownloadUtils.ProgressHandler = { progress in
                     Task { @MainActor in self.loadProgress[kind] = progress.fractionCompleted }
@@ -171,7 +259,8 @@ final class SpeechEngine: ObservableObject, BackendStatusReporting {
                     // paying that cost twice.
                     self.ttsAssets = try await TtsModels.download(directory: dir, progressHandler: progressHandler)
                 case .stt:
-                    try await AsrModels.download(to: dir, version: .v3, progressHandler: progressHandler)
+                    try await AsrModels.download(
+                        to: dir, version: Self.sttVersion, progressHandler: progressHandler)
                 }
                 await MainActor.run {
                     self.loadProgress[kind] = 1.0
@@ -211,14 +300,15 @@ final class SpeechEngine: ObservableObject, BackendStatusReporting {
                     if let cached = self.ttsAssets {
                         assets = cached
                     } else {
-                        assets = try await TtsModels.download(directory: Self.directory(for: kind))
+                        assets = try await TtsModels.download(directory: try Self.directory(for: kind))
                         self.ttsAssets = assets
                     }
-                    let manager = KokoroTtsManager(directory: Self.directory(for: kind))
+                    let manager = KokoroTtsManager(directory: try Self.directory(for: kind))
                     try await manager.initialize(models: assets)
                     await MainActor.run { self.tts = manager }
                 case .stt:
-                    let models = try await AsrModels.load(from: Self.directory(for: kind), version: .v3)
+                    let models = try await AsrModels.load(
+                        from: Self.directory(for: kind), version: Self.sttVersion)
                     let manager = AsrManager(config: .default)
                     try await manager.initialize(models: models)
                     await MainActor.run { self.asr = manager }
@@ -265,7 +355,7 @@ final class SpeechEngine: ObservableObject, BackendStatusReporting {
         loadProgress[kind] = nil
         if kind == .tts { ttsAssets = nil }
 
-        let dir = Self.directory(for: kind)
+        let dir = try Self.contentDirectory(for: kind)
         if FileManager.default.fileExists(atPath: dir.path) {
             try FileManager.default.removeItem(at: dir)
             print("[SpeechEngine] removed \(kind.rawValue) from \(dir.path)")
