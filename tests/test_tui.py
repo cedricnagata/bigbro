@@ -415,7 +415,8 @@ async def test_verb_keys_type_into_a_settings_field_rather_than_firing(daemon):
     app = BigBroApp(socket_path=daemon.socket_path)
     async with app.run_test() as pilot:
         await _settled(pilot, lambda: app.query_one("#set-port", Input).value == "8765")
-        await pilot.press("3")  # Settings
+        await pilot.press("3")      # Settings — focuses the pane, not a field
+        await pilot.press("tab")    # ...so tab into the field
         assert await _settled(pilot, lambda: app.query_one("#set-port", Input).has_focus)
 
         before = len(daemon.calls)
@@ -462,3 +463,84 @@ async def test_arrowing_along_the_tab_bar_focuses_the_new_table(daemon):
 
         await pilot.press("down")
         assert await _settled(pilot, lambda: table.cursor_row == 1)
+
+
+# MARK: - Pane navigation with the arrow keys
+
+
+async def test_left_and_right_cycle_the_panes(daemon):
+    """The tables and log bind left/right themselves; they have to give them back."""
+    from textual.widgets import TabbedContent
+
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        tabs = app.query_one(TabbedContent)
+        await _settled(pilot, lambda: "status" in daemon.commands())
+
+        for expected in ("models", "settings", "log", "devices"):
+            await pilot.press("right")
+            assert await _settled(pilot, lambda e=expected: tabs.active == e), expected
+
+        for expected in ("log", "settings", "models", "devices"):
+            await pilot.press("left")
+            assert await _settled(pilot, lambda e=expected: tabs.active == e), expected
+
+
+async def test_up_down_still_move_the_row_cursor(daemon):
+    """Reclaiming left/right must not cost the vertical navigation."""
+    from textual.widgets import DataTable
+
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        table = app.query_one("#models-table", DataTable)
+        await _settled(pilot, lambda: table.row_count >= 2)
+        await pilot.press("2")
+        await _settled(pilot, lambda: table.has_focus)
+
+        await pilot.press("down")
+        assert await _settled(pilot, lambda: table.cursor_row == 1)
+
+
+async def test_settings_focuses_the_pane_not_a_field(daemon):
+    """Landing in an Input traps the keyboard: left/right edit, 1-4 type digits."""
+    from textual.containers import VerticalScroll
+    from textual.widgets import TabbedContent
+
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        tabs = app.query_one(TabbedContent)
+        await _settled(pilot, lambda: "status" in daemon.commands())
+
+        await pilot.press("3")
+        assert await _settled(pilot, lambda: tabs.active == "settings")
+        assert await _settled(pilot, lambda: isinstance(app.focused, VerticalScroll))
+
+        # ...so arrowing onward still works rather than stranding you here.
+        await pilot.press("right")
+        assert await _settled(pilot, lambda: tabs.active == "log")
+
+
+async def test_tab_reaches_the_settings_field_and_escape_leaves_it(daemon):
+    from textual.containers import VerticalScroll
+    from textual.widgets import Input, TabbedContent
+
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        tabs = app.query_one(TabbedContent)
+        await _settled(pilot, lambda: app.query_one("#set-port", Input).value == "8765")
+        await pilot.press("3")
+        await _settled(pilot, lambda: tabs.active == "settings")
+
+        await pilot.press("tab")
+        assert await _settled(pilot, lambda: app.query_one("#set-port", Input).has_focus)
+
+        # In a field, left/right edit text rather than changing pane.
+        port = app.query_one("#set-port", Input)
+        port.value, port.cursor_position = "8765", 4
+        await pilot.press("left")
+        await pilot.pause()
+        assert tabs.active == "settings"
+        assert port.cursor_position == 3
+
+        await pilot.press("escape")
+        assert await _settled(pilot, lambda: isinstance(app.focused, VerticalScroll))

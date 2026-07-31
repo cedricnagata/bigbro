@@ -131,6 +131,30 @@ class ConfirmPrompt(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class PaneTable(DataTable):
+    """A DataTable that gives left/right back to the tab bar.
+
+    DataTable binds them to column navigation, which means nothing here: the
+    cursor is a row cursor, so there are no columns to move between. Leaving them
+    bound would make left/right silently dead in the pane a person is most likely
+    to press them in — the tabs are right above the table.
+    """
+
+    BINDINGS = [
+        Binding("left", "app.previous_pane", "Previous pane", show=False),
+        Binding("right", "app.next_pane", "Next pane", show=False),
+    ]
+
+
+class PaneLog(RichLog):
+    """Same, for the log pane. Its left/right scroll horizontally, and it wraps."""
+
+    BINDINGS = [
+        Binding("left", "app.previous_pane", "Previous pane", show=False),
+        Binding("right", "app.next_pane", "Next pane", show=False),
+    ]
+
+
 class BigBroApp(App):
     TITLE = "bigbro"
 
@@ -192,7 +216,9 @@ class BigBroApp(App):
         Binding("2", "show_pane('models')", "Models", show=False),
         Binding("3", "show_pane('settings')", "Settings", show=False),
         Binding("4", "show_pane('log')", "Log", show=False),
-        Binding("tab", "next_pane", "Next pane", show=False),
+        Binding("escape", "focus_pane", "Leave field", show=False),
+        Binding("left", "previous_pane", "Prev pane", show=False),
+        Binding("right", "next_pane", "Next pane", show=False),
     ]
 
     #: What takes focus when each pane is shown. Activating a tab leaves focus on
@@ -201,7 +227,7 @@ class BigBroApp(App):
     PANE_FOCUS = {
         "devices": "#devices-table",
         "models": "#models-table",
-        "settings": "#set-port",
+        "settings": "#settings-pane",
         "log": "#log-view",
     }
 
@@ -228,11 +254,11 @@ class BigBroApp(App):
         yield Static("connecting…", id="status-bar")
         with TabbedContent(initial="devices"):
             with TabPane("Devices", id="devices"):
-                yield DataTable(id="devices-table", cursor_type="row")
+                yield PaneTable(id="devices-table", cursor_type="row")
             with TabPane("Models", id="models"):
-                yield DataTable(id="models-table", cursor_type="row")
+                yield PaneTable(id="models-table", cursor_type="row")
             with TabPane("Settings", id="settings"):
-                with VerticalScroll(id="settings-pane"):
+                with VerticalScroll(id="settings-pane", can_focus=True):
                     yield Label("Port", classes="dim")
                     yield Input(id="set-port", placeholder="8765")
                     yield Label("Keep the Mac awake while serving", classes="dim")
@@ -241,7 +267,7 @@ class BigBroApp(App):
                     yield Input(id="set-log-level", placeholder="DEBUG / INFO / WARNING / ERROR")
                     yield Static("", id="settings-message")
             with TabPane("Log", id="log"):
-                yield RichLog(id="log-view", markup=True, wrap=True, max_lines=2000)
+                yield PaneLog(id="log-view", markup=True, wrap=True, max_lines=2000)
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -281,13 +307,23 @@ class BigBroApp(App):
             tabs.active = pane
             self._focus_active_pane()
 
-    def action_next_pane(self) -> None:
+    def _step_pane(self, delta: int) -> None:
         order = list(self.PANE_FOCUS)
         tabs = self._find("TabbedContent", TabbedContent)
         if tabs is None:
             return
         current = order.index(tabs.active) if tabs.active in order else 0
-        tabs.active = order[(current + 1) % len(order)]
+        tabs.active = order[(current + delta) % len(order)]
+        self._focus_active_pane()
+
+    def action_next_pane(self) -> None:
+        self._step_pane(1)
+
+    def action_previous_pane(self) -> None:
+        self._step_pane(-1)
+
+    def action_focus_pane(self) -> None:
+        """Returns focus from a text field to the pane around it."""
         self._focus_active_pane()
 
     def _find(self, selector: str, kind):

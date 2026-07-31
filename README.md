@@ -85,8 +85,12 @@ window, over SSH). Quitting an attached dashboard leaves the daemon serving — 
 `q` quit · `r` refresh · `d` download · `s` start · `x` stop · `delete` delete the selected model
 or forget the selected device · `enter` approve a pairing request · `esc` deny it.
 
-Move between panes with `1`–`4` or `tab`; the pane's table takes focus when it opens, so the arrow
-keys move the selection straight away.
+Move between panes with `←`/`→` or `1`–`4`; move the selection within a pane with `↑`/`↓`. The
+pane's table takes focus when it opens, so the arrow keys work straight away.
+
+The Settings pane focuses the pane itself rather than a text field, so `←`/`→` still change pane
+from there. Press `tab` to move into a field to edit it — inside a field `←`/`→` edit the text as
+usual — and `esc` to step back out.
 
 **Pairing happens here.** When an unknown device connects, a prompt appears on its own — Enter
 approves, Escape denies. No second shell, no `bigbro pair approve`. The CLI commands still work
