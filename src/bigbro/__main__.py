@@ -114,12 +114,35 @@ async def _serve_with_ui(daemon) -> None:
     root.addHandler(LogEventHandler(daemon.events))
 
     server = asyncio.create_task(daemon.run())
+    app = BigBroApp(owns_daemon=True)
+
+    def daemon_died(task: asyncio.Task) -> None:
+        """Takes the UI down with the daemon, carrying the real reason.
+
+        Without this a daemon that fails to start leaves the dashboard up and
+        retrying, reporting only that it cannot find a control socket — which
+        describes the symptom and hides the cause (a port already in use, a
+        permission denied, a crash on startup).
+        """
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            app.daemon_error = error
+            if app.is_running:
+                app.exit()
+
+    server.add_done_callback(daemon_died)
+
     try:
-        await BigBroApp(owns_daemon=True).run_async()
+        await app.run_async()
     finally:
         daemon.stop()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await asyncio.wait_for(server, timeout=10)
+
+    if getattr(app, "daemon_error", None) is not None:
+        raise SystemExit(f"error: the daemon stopped: {app.daemon_error}")
 
 
 def cmd_ui(_args: argparse.Namespace) -> int:

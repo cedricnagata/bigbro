@@ -63,6 +63,9 @@ class Daemon:
         self.router.on_peer_change = self._on_peer_change
         self.downloader.on_progress = self._on_download_progress
 
+        self._stopping = asyncio.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
+
     @property
     def port(self) -> int:
         return self.settings.port
@@ -70,9 +73,6 @@ class Daemon:
     @property
     def keep_awake(self) -> bool:
         return self.settings.keep_awake
-
-        self._stopping = asyncio.Event()
-        self._loop: asyncio.AbstractEventLoop | None = None
 
     # MARK: - Lifecycle
 

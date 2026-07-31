@@ -189,6 +189,9 @@ class BigBroApp(App):
         # daemon too — the user started one thing and expects to stop one thing.
         # When attached via `bigbro ui`, quitting must leave it running.
         self.owns_daemon = owns_daemon
+        #: Set by `serve` when the daemon task dies, so the reason survives the UI
+        #: coming down and can be reported instead of a bare socket-not-found.
+        self.daemon_error: BaseException | None = None
         self._status: dict[str, Any] = {}
         self._models: list[dict[str, Any]] = []
         self._devices: list[dict[str, Any]] = []
