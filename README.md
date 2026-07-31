@@ -26,23 +26,21 @@ run separately. Your Mac downloads the models itself, on first use or from the C
 
 ## Installation
 
-BigBro is not on PyPI — the name `bigbro` there belongs to an unrelated project, so
-`pip install bigbro` fetches someone else's package and gives you no `bigbro` command. Install
-from the repo instead:
+BigBro is not published yet — install it from the repo:
 
 ```sh
 git clone https://github.com/cedricnagata/bigbro
 uv tool install ./bigbro
 ```
 
-`uv` puts the daemon and its dependencies in their own environment with their own interpreter, so
-the MLX stack cannot disturb anything else you have installed. `pipx install ./bigbro` does the
-same.
+That puts `bigbro` on your PATH with its own interpreter and its own copy of the MLX stack, so
+nothing else on your machine is touched.
 
-Plain `pip install -e .` works and puts `bigbro` on your PATH, but installs into whichever Python
-is active — and the MLX stack pulls recent `transformers`, `huggingface-hub`, `pydantic` and
-`fastapi`, which will upgrade those for every other project sharing that interpreter. Prefer `uv`
-or `pipx` unless you are deliberately installing into a virtualenv of your own.
+> **Don't `pip install bigbro`.** The name on PyPI belongs to an unrelated project, so you get
+> someone else's package and no `bigbro` command. A plain `pip install -e .` from this repo does
+> work, but installs into whichever Python is active — and the MLX stack pulls recent
+> `transformers`, `huggingface-hub`, `tokenizers`, `pydantic`, `fastapi` and `starlette`, which it
+> will upgrade for every other project sharing that interpreter.
 
 ## Usage
 
@@ -327,9 +325,13 @@ continuous version as `BigBroVoiceSession`.
 ```sh
 git clone https://github.com/cedricnagata/bigbro
 cd bigbro
+uv venv && source .venv/bin/activate
 uv pip install -e ".[dev]"
 pytest
 ```
+
+The venv is not optional housekeeping — without one, `uv pip install -e` targets whatever Python is
+active and upgrades the shared `transformers`/`huggingface-hub`/`pydantic` stack system-wide.
 
 The test suite covers everything that does not need Apple silicon — the response parsers, the
 catalog invariants, the wire codec, the pairing state machine, the control socket, and a full
