@@ -25,9 +25,30 @@ from .parsers import HarmonyStreamParser, PlainTextParser, ResponseParser, Think
 
 
 class Family(str, Enum):
-    """Which loader handles the model. Vision models accept images; language ones do not."""
+    """Which loader handles the model, and therefore what it can be asked to do.
+
+    Also the grouping the CLI and dashboard present, because these are not
+    interchangeable: a language model has no vision tower, and a speech model
+    answers nothing at all. Naming the wrong kind is an error rather than a
+    degraded answer, so they are never offered as one list.
+    """
     LANGUAGE = "language"
     VISION = "vision"
+    TTS = "tts"
+    STT = "stt"
+
+    @property
+    def is_speech(self) -> bool:
+        return self in (Family.TTS, Family.STT)
+
+    @property
+    def label(self) -> str:
+        return {
+            Family.LANGUAGE: "Text",
+            Family.VISION: "Vision",
+            Family.TTS: "TTS",
+            Family.STT: "STT",
+        }[self]
 
 
 class ReasoningStyle(str, Enum):
@@ -248,7 +269,74 @@ VISION_MODELS: tuple[BigBroModel, ...] = (
     ),
 )
 
+#: The models filling each speech role.
+#:
+#: Real catalog entries rather than two hardcoded repo constants, so they carry a
+#: name a person recognises — "Kokoro", not "tts" — and so a second model can be
+#: added to a role without restructuring anything. The *role* stays what the wire
+#: addresses: an iOS client sends `run: tts`, never `run: kokoro`, and keeps
+#: working if the model behind the role is ever swapped.
+SPEECH_MODELS: tuple[BigBroModel, ...] = (
+    BigBroModel(
+        id="kokoro",
+        display_name="Kokoro 82M",
+        family=Family.TTS,
+        reasoning=ReasoningStyle.NONE,
+        supports_tools=False,
+        approximate_gb=0.7,
+        repo="mlx-community/Kokoro-82M-4bit",
+    ),
+    BigBroModel(
+        id="parakeet",
+        display_name="Parakeet TDT 0.6B v3",
+        family=Family.STT,
+        reasoning=ReasoningStyle.NONE,
+        supports_tools=False,
+        approximate_gb=2.5,
+        repo="mlx-community/parakeet-tdt-0.6b-v3",
+    ),
+)
+
+#: The models a `request` or `generateRequest` can name. Deliberately excludes
+#: speech: asking Kokoro to answer a chat message is not a degraded answer, it is
+#: a category error, and `resolve` returning None makes it fail loudly.
 ALL_MODELS: tuple[BigBroModel, ...] = LANGUAGE_MODELS + VISION_MODELS
+
+#: Everything bigbro can download, for listing and for `models check`.
+EVERY_MODEL: tuple[BigBroModel, ...] = ALL_MODELS + SPEECH_MODELS
+
+#: Role name → the family it selects. `speech` means both.
+SPEECH_ROLES: dict[str, tuple[Family, ...]] = {
+    "tts": (Family.TTS,),
+    "stt": (Family.STT,),
+    "speech": (Family.TTS, Family.STT),
+}
+
+
+def models_in(family: Family) -> tuple[BigBroModel, ...]:
+    return tuple(m for m in EVERY_MODEL if m.family is family)
+
+
+def speech_model(family: Family) -> BigBroModel:
+    """The model currently filling a speech role."""
+    return models_in(family)[0]
+
+
+def resolve_speech(name: str) -> list[BigBroModel]:
+    """Speech models named by a role (`tts`, `stt`, `speech`) or by model id.
+
+    Accepting both is what lets the panes show "Kokoro" while the wire keeps
+    sending "tts" — the name on screen is also a name that works.
+    """
+    if not name:
+        return []
+    normalized = _normalize(name)
+
+    families = SPEECH_ROLES.get(name.strip().lower())
+    if families:
+        return [speech_model(f) for f in families]
+
+    return [m for m in SPEECH_MODELS if _normalize(m.id) == normalized]
 
 
 def _normalize(name: str) -> str:

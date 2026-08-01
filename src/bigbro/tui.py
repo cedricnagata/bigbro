@@ -214,9 +214,12 @@ class BigBroApp(App):
         # Switching panes from anywhere. Without these the only way back to the tab
         # bar is focus cycling, which is not obvious when the cursor is in a table.
         Binding("1", "show_pane('devices')", "Devices", show=False),
-        Binding("2", "show_pane('models')", "Models", show=False),
-        Binding("3", "show_pane('settings')", "Settings", show=False),
-        Binding("4", "show_pane('log')", "Log", show=False),
+        Binding("2", "show_pane('language')", "Text", show=False),
+        Binding("3", "show_pane('vision')", "Vision", show=False),
+        Binding("4", "show_pane('tts')", "TTS", show=False),
+        Binding("5", "show_pane('stt')", "STT", show=False),
+        Binding("6", "show_pane('settings')", "Settings", show=False),
+        Binding("7", "show_pane('log')", "Log", show=False),
         Binding("escape", "focus_pane", "Leave field", show=False),
         Binding("left", "previous_pane", "Prev pane", show=False),
         Binding("right", "next_pane", "Next pane", show=False),
@@ -225,9 +228,17 @@ class BigBroApp(App):
     #: What takes focus when each pane is shown. Activating a tab leaves focus on
     #: the tab bar, so without this the arrow keys never reach the table the user
     #: is looking at and the selection appears frozen.
+    #: The four panes that list models, in tab order. Keyed by the catalog family
+    #: so a pane and a family are the same thing — which is what lets a speech
+    #: pane show "Kokoro" while `tts` stays the name the wire uses.
+    MODEL_PANES = ("language", "vision", "tts", "stt")
+
     PANE_FOCUS = {
         "devices": "#devices-table",
-        "models": "#models-table",
+        "language": "#language-table",
+        "vision": "#vision-table",
+        "tts": "#tts-table",
+        "stt": "#stt-table",
         "settings": "#settings-pane",
         "log": "#log-view",
     }
@@ -243,11 +254,11 @@ class BigBroApp(App):
         #: coming down and can be reported instead of a bare socket-not-found.
         self.daemon_error: BaseException | None = None
         self._status: dict[str, Any] = {}
-        self._models: list[dict[str, Any]] = []
         self._devices: list[dict[str, Any]] = []
         self._settings: dict[str, Any] = {}
         self._prompting: set[str] = set()
-        self._state_column = None
+        self._state_columns: dict[str, Any] = {}
+        self._groups: dict[str, list[dict[str, Any]]] = {}
 
     # MARK: - Layout
 
@@ -257,8 +268,14 @@ class BigBroApp(App):
         with TabbedContent(initial="devices"):
             with TabPane("Devices", id="devices"):
                 yield PaneTable(id="devices-table", cursor_type="row")
-            with TabPane("Models", id="models"):
-                yield PaneTable(id="models-table", cursor_type="row")
+            with TabPane("Text", id="language"):
+                yield PaneTable(id="language-table", cursor_type="row")
+            with TabPane("Vision", id="vision"):
+                yield PaneTable(id="vision-table", cursor_type="row")
+            with TabPane("TTS", id="tts"):
+                yield PaneTable(id="tts-table", cursor_type="row")
+            with TabPane("STT", id="stt"):
+                yield PaneTable(id="stt-table", cursor_type="row")
             with TabPane("Settings", id="settings"):
                 with VerticalScroll(id="settings-pane", can_focus=True):
                     yield Label("Port", classes="dim")
@@ -276,12 +293,15 @@ class BigBroApp(App):
         devices = self._dash.query_one("#devices-table", DataTable)
         devices.add_columns("", "device", "app", "id", "models")
 
-        models = self._dash.query_one("#models-table", DataTable)
         # Keys are kept because live updates address the state column by name.
         # Indexing off the end silently retargets the moment a column is added —
         # which is how download progress ended up being written into "memory".
-        columns = models.add_columns("model", "size", "caps", "state", "memory")
-        self._state_column = columns[3]
+        # One key per table: DataTable column keys are per-instance, so reusing the
+        # last pane's key against another pane's table silently fails to update.
+        for family in self.MODEL_PANES:
+            table = self._dash.query_one(f"#{family}-table", DataTable)
+            columns = table.add_columns("model", "size", "caps", "state", "memory")
+            self._state_columns[family] = columns[3]
 
         self.listen_for_events()
         await self.action_refresh()
@@ -455,11 +475,10 @@ class BigBroApp(App):
 
         models = await self._call("models.list")
         if models.get("ok"):
-            self._models = models.get("models", []) + [
-                {**entry, "family": "speech", "sizeGB": None, "tools": False,
-                 "images": False, "reasoning": "none"}
-                for entry in models.get("speech", [])
-            ]
+            self._groups = {
+                group["family"]: group.get("models", [])
+                for group in models.get("groups", [])
+            }
             self._render_models()
 
         settings = await self._call("settings.get")
@@ -524,20 +543,24 @@ class BigBroApp(App):
             table.move_cursor(row=min(cursor, table.row_count - 1))
 
     def _render_models(self) -> None:
-        table = self._find("#models-table", DataTable)
+        for family in self.MODEL_PANES:
+            self._render_model_pane(family)
+
+    def _render_model_pane(self, family: str) -> None:
+        table = self._find(f"#{family}-table", DataTable)
         if table is None:
             return
         cursor = table.cursor_row
         table.clear()
 
-        for model in self._models:
-            size = model.get("sizeGB")
+        for model in self._groups.get(family, []):
             caps = "".join([
                 "T" if model.get("tools") else "-",
                 "I" if model.get("images") else "-",
                 "R" if model.get("reasoning", "none") != "none" else "-",
             ])
-            held = (self._status.get("memory") or {}).get("models", {}).get(model.get("id"))
+            size = model.get("sizeGB")
+            held = model.get("memory")
             table.add_row(
                 model.get("id", "?"),
                 f"{size:.1f}G" if isinstance(size, (int, float)) else "-",
@@ -563,16 +586,24 @@ class BigBroApp(App):
             if total:
                 state = f"downloading {round((event.get('fraction') or 0) * 100)}%"
 
-        for model in self._models:
-            if model.get("id") == model_id:
-                model["state"] = state or model.get("state")
+        family = None
+        for candidate, models in self._groups.items():
+            for model in models:
+                if model.get("id") == model_id:
+                    model["state"] = state or model.get("state")
+                    family = candidate
+                    break
+            if family:
                 break
 
-        table = self._find("#models-table", DataTable)
-        if table is None or self._state_column is None:
+        column = self._state_columns.get(family) if family else None
+        if column is None:
+            return
+        table = self._find(f"#{family}-table", DataTable)
+        if table is None:
             return
         try:
-            table.update_cell(f"model:{model_id}", self._state_column, state or "?")
+            table.update_cell(f"model:{model_id}", column, state or "?")
         except Exception:
             # Row not present yet (a speech model, or a race with a rebuild).
             pass
@@ -618,7 +649,8 @@ class BigBroApp(App):
         confirm first.
         """
         active = self._dash.query_one(TabbedContent).active
-        key = self._selected_key(f"#{active}-table") if active in ("devices", "models") else None
+        panes = ("devices",) + self.MODEL_PANES
+        key = self._selected_key(f"#{active}-table") if active in panes else None
         if not key:
             return
 
@@ -641,10 +673,11 @@ class BigBroApp(App):
                 await self.action_refresh()
 
     def _selected_model(self) -> str | None:
-        """The model id under the cursor, or None if the Models pane isn't showing one."""
-        if self._dash.query_one(TabbedContent).active != "models":
+        """The model id under the cursor in whichever model pane is showing."""
+        active = self._dash.query_one(TabbedContent).active
+        if active not in self.MODEL_PANES:
             return None
-        key = self._selected_key("#models-table")
+        key = self._selected_key(f"#{active}-table")
         if not key or not key.startswith("model:"):
             return None
         return key.split(":", 1)[1]

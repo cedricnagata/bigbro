@@ -33,17 +33,55 @@ async def test_status_reports_the_daemon_shape(daemon):
     assert set(reply["speech"]) == {"tts", "stt"}
 
 
-async def test_models_list_covers_the_whole_catalog(daemon):
-    from bigbro.inference.catalog import ALL_MODELS
+async def test_models_list_is_grouped_by_family(daemon):
+    """Grouped because they are not interchangeable — naming the wrong kind fails."""
+    from bigbro.inference.catalog import EVERY_MODEL, Family
 
     reply = await daemon.handle_control({"command": "models.list"})
     assert reply["ok"] is True
-    assert len(reply["models"]) == len(ALL_MODELS)
 
-    entry = next(m for m in reply["models"] if m["id"] == "gpt-oss-20b")
+    groups = {g["family"]: g for g in reply["groups"]}
+    assert list(groups) == [f.value for f in Family]
+    assert [g["label"] for g in reply["groups"]] == ["Text", "Vision", "TTS", "STT"]
+
+    listed = [m for g in reply["groups"] for m in g["models"]]
+    assert len(listed) == len(EVERY_MODEL)
+
+    entry = next(m for m in groups["language"]["models"] if m["id"] == "gpt-oss-20b")
     assert entry["tools"] is True
     assert entry["reasoning"] == "harmony"
     assert entry["state"] == "not downloaded"
+
+
+async def test_speech_models_are_listed_by_name_under_their_role(daemon):
+    """"tts" names a job; "kokoro" names something a person can look up."""
+    reply = await daemon.handle_control({"command": "models.list"})
+    groups = {g["family"]: g for g in reply["groups"]}
+
+    assert [m["id"] for m in groups["tts"]["models"]] == ["kokoro"]
+    assert groups["tts"]["models"][0]["name"] == "Kokoro 82M"
+    assert [m["id"] for m in groups["stt"]["models"]] == ["parakeet"]
+
+
+@pytest.mark.parametrize("name", ["tts", "kokoro", "stt", "parakeet"])
+async def test_speech_commands_accept_role_and_model_name(daemon, name):
+    """The wire sends roles; the panes show model names. Both must work."""
+    reply = await daemon.handle_control({"command": "models.stop", "model": name})
+    assert reply["ok"] is True, reply
+
+
+async def test_speech_as_a_whole_addresses_both_roles(daemon):
+    reply = await daemon.handle_control({"command": "models.stop", "model": "speech"})
+    assert reply["ok"] is True
+    assert reply["model"] == "kokoro, parakeet"
+
+
+async def test_a_speech_model_cannot_be_named_for_inference(daemon):
+    """Asking Kokoro to answer a chat message is a category error, not a fallback."""
+    from bigbro.inference import catalog
+
+    assert catalog.resolve("kokoro") is None
+    assert catalog.resolve("parakeet") is None
 
 
 async def test_models_commands_reject_an_unknown_model(daemon):

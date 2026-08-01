@@ -207,8 +207,11 @@ def cmd_status(_args: argparse.Namespace) -> int:
             print(f"    {model_id:20s} {human(size)}")
     print(f"  running:     {', '.join(reply['running']) or 'nothing'}")
     print(f"  downloaded:  {', '.join(reply['downloaded']) or 'nothing'}")
-    for kind, state in reply.get("speech", {}).items():
-        print(f"  {kind + ':':12s} {state}")
+    for role, info in (reply.get("speech") or {}).items():
+        # Older daemons sent a bare state string here.
+        name = info.get("name", role) if isinstance(info, dict) else role
+        state = info.get("state", info) if isinstance(info, dict) else info
+        print(f"  {role + ':':12s} {state}  ({name})")
     return 0
 
 
@@ -280,18 +283,27 @@ def cmd_models(args: argparse.Namespace) -> int:
             print(f"error: {reply.get('error')}", file=sys.stderr)
             return 1
 
-        print(f"{'ID':22s} {'SIZE':>7s}  {'CAPS':10s} {'STATE'}")
-        for model in reply["models"]:
-            caps = "".join([
-                "T" if model["tools"] else "-",
-                "I" if model["images"] else "-",
-                "R" if model["reasoning"] != "none" else "-",
-            ])
-            print(f"{model['id']:22s} {model['sizeGB']:>6.1f}G  {caps:10s} {model['state']}")
-        print()
-        for entry in reply.get("speech", []):
-            print(f"{entry['id']:22s} {'':>7s}  {'':10s} {entry['state']}  ({entry['name']})")
+        from .macos.memory import human
+
+        for group in reply.get("groups", []):
+            models = group.get("models") or []
+            if not models:
+                continue
+            print(f"\n{group['label']}")
+            for model in models:
+                caps = "".join([
+                    "T" if model.get("tools") else "-",
+                    "I" if model.get("images") else "-",
+                    "R" if model.get("reasoning", "none") != "none" else "-",
+                ])
+                size = model.get("sizeGB")
+                size_text = f"{size:>6.1f}G" if isinstance(size, (int, float)) else f"{'':>7s}"
+                held = model.get("memory")
+                suffix = f"   {human(held)}" if held else ""
+                print(f"  {model['id']:20s} {size_text}  {caps:5s} {model['state']}{suffix}")
+
         print("\ncaps: T=tools I=images R=reasoning")
+        print("speech models also answer to their role: tts, stt, or speech for both")
         return 0
 
     command = f"models.{args.action}"
@@ -320,11 +332,11 @@ def _check_catalog() -> int:
     from huggingface_hub import HfApi
     from huggingface_hub.utils import HfHubHTTPError
 
-    from .inference.catalog import ALL_MODELS
+    from .inference.catalog import EVERY_MODEL
 
     api = HfApi()
     failures = 0
-    for model in ALL_MODELS:
+    for model in EVERY_MODEL:
         try:
             api.model_info(model.repo)
             print(f"  ok    {model.id:22s} {model.repo}")
@@ -335,9 +347,9 @@ def _check_catalog() -> int:
 
     print()
     if failures:
-        print(f"{failures} of {len(ALL_MODELS)} catalog entries did not resolve.")
+        print(f"{failures} of {len(EVERY_MODEL)} catalog entries did not resolve.")
         return 1
-    print(f"All {len(ALL_MODELS)} catalog entries resolve.")
+    print(f"All {len(EVERY_MODEL)} catalog entries resolve.")
     return 0
 
 

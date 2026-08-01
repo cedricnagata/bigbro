@@ -78,9 +78,15 @@ window, over SSH). Quitting an attached dashboard leaves the daemon serving — 
 | Pane | What it does |
 |---|---|
 | **Devices** | Paired devices with live connection status, and anything awaiting approval |
-| **Models** | The catalog with capabilities, lifecycle state, live download progress and per-model memory. `d`/`s`/`x`/`delete` are the same four verbs as the CLI |
+| **Text** / **Vision** / **TTS** / **STT** | One pane per model family, each listing real model names with capabilities, lifecycle state, live download progress and memory held. `d`/`s`/`x`/`delete` are the same four verbs as the CLI |
 | **Settings** | Port, keep-awake and log level, persisted to `config.json` |
 | **Log** | The daemon's log, including when attached over the control socket |
+
+Models are split by family rather than pooled into one list because they are not
+interchangeable: a language model has no vision tower, and a speech model answers nothing at all.
+Naming the wrong kind is an error rather than a degraded answer, so they are never offered as one
+list. A pane *is* a family — which is what lets the TTS pane show **Kokoro** while `tts` stays the
+name the wire protocol uses.
 
 The status bar carries the daemon's memory footprint and its share of installed RAM, and the
 Models pane shows what each resident model is actually costing.
@@ -88,7 +94,7 @@ Models pane shows what each resident model is actually costing.
 `q` quit · `r` refresh · `d` download · `s` start · `x` stop · `delete` delete the selected model
 or forget the selected device · `enter` approve a pairing request · `esc` deny it.
 
-Move between panes with `←`/`→` or `1`–`4`; move the selection within a pane with `↑`/`↓`. The
+Move between panes with `←`/`→` or `1`–`7`; move the selection within a pane with `↑`/`↓`. The
 pane's table takes focus when it opens, so the arrow keys work straight away.
 
 The Settings pane focuses the pane itself rather than a text field, so `←`/`→` still change pane
@@ -126,7 +132,8 @@ Four verbs, two axes: **download / delete** are about disk, **start / stop** are
 weights aren't there, and a request for a model that isn't running starts it anyway — the verbs
 just let you pay those costs when you choose to.
 
-`start`, `stop` and `delete` also accept `tts` and `stt` for the speech models.
+Speech models answer to their own names (`kokoro`, `parakeet`) and to the role they fill
+(`tts`, `stt`, or `speech` for both) — so whatever the panes display can also be typed.
 
 ### Downloads
 

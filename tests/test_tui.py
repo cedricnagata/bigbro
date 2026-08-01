@@ -36,6 +36,23 @@ class StubDaemon:
              "sizeGB": 2.4, "tools": True, "images": False, "reasoning": "think_tags_togglable"},
             {"id": "gpt-oss-20b", "name": "gpt-oss 20B", "family": "language", "state": "running",
              "sizeGB": 12.0, "tools": True, "images": False, "reasoning": "harmony"},
+            {"id": "llama-3.2-1b", "name": "Llama 3.2 1B", "family": "language",
+             "state": "downloaded", "sizeGB": 0.7, "tools": True, "images": False,
+             "reasoning": "none"},
+        ]
+        self.vision: list[dict] = [
+            {"id": "qwen2.5-vl-3b", "name": "Qwen2.5-VL 3B", "family": "vision",
+             "state": "not downloaded", "sizeGB": 2.0, "tools": False, "images": True,
+             "reasoning": "none"},
+        ]
+        self.tts: list[dict] = [
+            {"id": "kokoro", "name": "Kokoro 82M", "family": "tts", "state": "not downloaded",
+             "sizeGB": 0.7, "tools": False, "images": False, "reasoning": "none"},
+        ]
+        self.stt: list[dict] = [
+            {"id": "parakeet", "name": "Parakeet TDT 0.6B v3", "family": "stt",
+             "state": "not downloaded", "sizeGB": 2.5, "tools": False, "images": False,
+             "reasoning": "none"},
         ]
         self.settings = {"port": 8765, "keep_awake": True, "log_level": "INFO"}
 
@@ -62,8 +79,12 @@ class StubDaemon:
             self.devices = [d for d in self.devices if d["deviceId"] != request.get("deviceId")]
             return {"ok": True, "deviceId": request.get("deviceId"), "name": "iPhone"}
         if command == "models.list":
-            return {"ok": True, "models": self.models,
-                    "speech": [{"id": "tts", "name": "Kokoro", "state": "not downloaded"}]}
+            return {"ok": True, "groups": [
+                {"family": "language", "label": "Text", "models": self.models},
+                {"family": "vision", "label": "Vision", "models": self.vision},
+                {"family": "tts", "label": "TTS", "models": self.tts},
+                {"family": "stt", "label": "STT", "models": self.stt},
+            ]}
         if command in ("models.start", "models.stop", "models.download", "models.delete"):
             return {"ok": True, "model": request.get("model")}
         if command == "settings.get":
@@ -135,8 +156,8 @@ async def test_models_table_lists_the_catalog(daemon):
 
     app = BigBroApp(socket_path=daemon.socket_path)
     async with app.run_test() as pilot:
-        table = app.query_one("#models-table", DataTable)
-        assert await _settled(pilot, lambda: table.row_count >= 3)  # 2 models + speech
+        table = app.query_one("#language-table", DataTable)
+        assert await _settled(pilot, lambda: table.row_count == 3)  # the language models
 
 
 # MARK: - The pairing prompt
@@ -233,10 +254,10 @@ async def test_stop_key_stops_the_selected_model(daemon):
 
     app = BigBroApp(socket_path=daemon.socket_path)
     async with app.run_test() as pilot:
-        table = app.query_one("#models-table", DataTable)
-        await _settled(pilot, lambda: table.row_count >= 2)
+        table = app.query_one("#language-table", DataTable)
+        await _settled(pilot, lambda: table.row_count == 3)
 
-        app.query_one("TabbedContent").active = "models"
+        app.query_one("TabbedContent").active = "language"
         await pilot.pause()
         table.move_cursor(row=1)  # gpt-oss-20b, state "running"
         await pilot.press("x")
@@ -252,10 +273,10 @@ async def test_download_key_downloads_the_selected_model(daemon):
 
     app = BigBroApp(socket_path=daemon.socket_path)
     async with app.run_test() as pilot:
-        table = app.query_one("#models-table", DataTable)
-        await _settled(pilot, lambda: table.row_count >= 2)
+        table = app.query_one("#language-table", DataTable)
+        await _settled(pilot, lambda: table.row_count == 3)
 
-        app.query_one("TabbedContent").active = "models"
+        app.query_one("TabbedContent").active = "language"
         await pilot.pause()
         table.move_cursor(row=0)  # qwen3-4b, "not downloaded"
         await pilot.press("d")
@@ -269,7 +290,7 @@ async def test_download_progress_updates_state_without_a_full_reload(daemon):
     app = BigBroApp(socket_path=daemon.socket_path)
     async with app.run_test() as pilot:
         await _settled(pilot, lambda: daemon.bus.subscriber_count == 1)
-        await _settled(pilot, lambda: bool(app._models))
+        await _settled(pilot, lambda: bool(app._groups.get("language")))
 
         before = len(daemon.calls)
         daemon.bus.publish(
@@ -281,7 +302,8 @@ async def test_download_progress_updates_state_without_a_full_reload(daemon):
         assert await _settled(
             pilot,
             lambda: any(
-                m["id"] == "qwen3-4b" and "50%" in str(m.get("state")) for m in app._models
+                m["id"] == "qwen3-4b" and "50%" in str(m.get("state"))
+                for m in app._groups.get("language", [])
             ),
         )
         # A progress tick must not trigger a full refresh — they arrive twice a second.
@@ -354,10 +376,10 @@ async def test_the_table_takes_focus_so_arrow_keys_reach_it(daemon):
 
     app = BigBroApp(socket_path=daemon.socket_path)
     async with app.run_test() as pilot:
-        table = app.query_one("#models-table", DataTable)
-        await _settled(pilot, lambda: table.row_count >= 2)
+        table = app.query_one("#language-table", DataTable)
+        await _settled(pilot, lambda: table.row_count == 3)
 
-        await pilot.press("2")  # Models
+        await pilot.press("2")  # Text
         assert await _settled(pilot, lambda: table.has_focus)
 
         await pilot.press("down")
@@ -377,7 +399,10 @@ async def test_devices_table_is_focused_on_startup(daemon):
         assert await _settled(pilot, lambda: app.query_one("#devices-table", DataTable).has_focus)
 
 
-@pytest.mark.parametrize("key,pane", [("1", "devices"), ("2", "models"), ("3", "settings"), ("4", "log")])
+@pytest.mark.parametrize("key,pane", [
+    ("1", "devices"), ("2", "language"), ("3", "vision"),
+    ("4", "tts"), ("5", "stt"), ("6", "settings"), ("7", "log"),
+])
 async def test_number_keys_switch_panes(daemon, key, pane):
     from textual.widgets import TabbedContent
 
@@ -394,8 +419,8 @@ async def test_a_refresh_does_not_move_the_cursor_or_steal_focus(daemon):
 
     app = BigBroApp(socket_path=daemon.socket_path)
     async with app.run_test() as pilot:
-        table = app.query_one("#models-table", DataTable)
-        await _settled(pilot, lambda: table.row_count >= 2)
+        table = app.query_one("#language-table", DataTable)
+        await _settled(pilot, lambda: table.row_count == 3)
         await pilot.press("2")
         await _settled(pilot, lambda: table.has_focus)
         await pilot.press("down")
@@ -415,7 +440,7 @@ async def test_verb_keys_type_into_a_settings_field_rather_than_firing(daemon):
     app = BigBroApp(socket_path=daemon.socket_path)
     async with app.run_test() as pilot:
         await _settled(pilot, lambda: app.query_one("#set-port", Input).value == "8765")
-        await pilot.press("3")      # Settings — focuses the pane, not a field
+        await pilot.press("6")      # Settings — focuses the pane, not a field
         await pilot.press("tab")    # ...so tab into the field
         assert await _settled(pilot, lambda: app.query_one("#set-port", Input).has_focus)
 
@@ -433,11 +458,11 @@ async def test_clicking_a_tab_focuses_its_table(daemon):
 
     app = BigBroApp(socket_path=daemon.socket_path)
     async with app.run_test() as pilot:
-        table = app.query_one("#models-table", DataTable)
-        await _settled(pilot, lambda: table.row_count >= 2)
+        table = app.query_one("#language-table", DataTable)
+        await _settled(pilot, lambda: table.row_count == 3)
 
-        await pilot.click(app.query(Tab)[1])  # Models
-        assert await _settled(pilot, lambda: app.query_one(TabbedContent).active == "models")
+        await pilot.click(app.query(Tab)[1])  # Text
+        assert await _settled(pilot, lambda: app.query_one(TabbedContent).active == "language")
         assert await _settled(pilot, lambda: table.has_focus)
 
         await pilot.press("down")
@@ -450,15 +475,15 @@ async def test_arrowing_along_the_tab_bar_focuses_the_new_table(daemon):
 
     app = BigBroApp(socket_path=daemon.socket_path)
     async with app.run_test() as pilot:
-        table = app.query_one("#models-table", DataTable)
-        await _settled(pilot, lambda: table.row_count >= 2)
+        table = app.query_one("#language-table", DataTable)
+        await _settled(pilot, lambda: table.row_count == 3)
 
         await pilot.press("1")
         await _settled(pilot, lambda: app.query_one("#devices-table", DataTable).has_focus)
         await pilot.press("shift+tab")   # up to the tab bar
         await pilot.press("right")       # across to Models
 
-        assert await _settled(pilot, lambda: app.query_one(TabbedContent).active == "models")
+        assert await _settled(pilot, lambda: app.query_one(TabbedContent).active == "language")
         assert await _settled(pilot, lambda: table.has_focus)
 
         await pilot.press("down")
@@ -477,11 +502,11 @@ async def test_left_and_right_cycle_the_panes(daemon):
         tabs = app.query_one(TabbedContent)
         await _settled(pilot, lambda: "status" in daemon.commands())
 
-        for expected in ("models", "settings", "log", "devices"):
+        for expected in ("language", "vision", "tts", "stt", "settings", "log", "devices"):
             await pilot.press("right")
             assert await _settled(pilot, lambda e=expected: tabs.active == e), expected
 
-        for expected in ("log", "settings", "models", "devices"):
+        for expected in ("log", "settings", "stt", "tts", "vision", "language", "devices"):
             await pilot.press("left")
             assert await _settled(pilot, lambda e=expected: tabs.active == e), expected
 
@@ -492,8 +517,8 @@ async def test_up_down_still_move_the_row_cursor(daemon):
 
     app = BigBroApp(socket_path=daemon.socket_path)
     async with app.run_test() as pilot:
-        table = app.query_one("#models-table", DataTable)
-        await _settled(pilot, lambda: table.row_count >= 2)
+        table = app.query_one("#language-table", DataTable)
+        await _settled(pilot, lambda: table.row_count == 3)
         await pilot.press("2")
         await _settled(pilot, lambda: table.has_focus)
 
@@ -511,7 +536,7 @@ async def test_settings_focuses_the_pane_not_a_field(daemon):
         tabs = app.query_one(TabbedContent)
         await _settled(pilot, lambda: "status" in daemon.commands())
 
-        await pilot.press("3")
+        await pilot.press("6")
         assert await _settled(pilot, lambda: tabs.active == "settings")
         assert await _settled(pilot, lambda: isinstance(app.focused, VerticalScroll))
 
@@ -528,7 +553,7 @@ async def test_tab_reaches_the_settings_field_and_escape_leaves_it(daemon):
     async with app.run_test() as pilot:
         tabs = app.query_one(TabbedContent)
         await _settled(pilot, lambda: app.query_one("#set-port", Input).value == "8765")
-        await pilot.press("3")
+        await pilot.press("6")
         await _settled(pilot, lambda: tabs.active == "settings")
 
         await pilot.press("tab")
@@ -557,8 +582,8 @@ async def test_download_progress_updates_the_state_cell_not_another_column(daemo
 
     app = BigBroApp(socket_path=daemon.socket_path)
     async with app.run_test() as pilot:
-        table = app.query_one("#models-table", DataTable)
-        await _settled(pilot, lambda: table.row_count >= 2)
+        table = app.query_one("#language-table", DataTable)
+        await _settled(pilot, lambda: table.row_count == 3)
         await _settled(pilot, lambda: daemon.bus.subscriber_count == 1)
 
         def cells():

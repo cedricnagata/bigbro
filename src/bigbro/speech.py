@@ -22,6 +22,7 @@ from typing import AsyncIterator
 
 import numpy as np
 
+from .inference import catalog
 from .inference.downloader import DownloadRecord, hub_repository_root
 
 log = logging.getLogger("bigbro.speech")
@@ -34,9 +35,6 @@ CHUNK_BYTES = 8 * 1024
 #: raw wire request that omits `voice` entirely.
 DEFAULT_VOICE = "af_heart"
 
-TTS_REPO = "mlx-community/Kokoro-82M-4bit"
-STT_REPO = "mlx-community/parakeet-tdt-0.6b-v3"
-
 _WAV_HEADER_BYTES = 44
 
 
@@ -45,27 +43,60 @@ class SpeechError(Exception):
 
 
 class ModelKind(str, Enum):
+    """A speech role, and by extension the model currently filling it.
+
+    The role is what the wire addresses — an iOS client sends `run: tts`, never
+    `run: kokoro` — so it stays the runtime key. Everything a person sees comes
+    from the catalog entry behind it.
+    """
+
     TTS = "tts"
     STT = "stt"
 
     @property
+    def family(self) -> catalog.Family:
+        return catalog.Family.TTS if self is ModelKind.TTS else catalog.Family.STT
+
+    @property
+    def model(self) -> catalog.BigBroModel:
+        return catalog.speech_model(self.family)
+
+    @property
+    def model_name(self) -> str:
+        return self.model.display_name
+
+    @property
+    def role(self) -> str:
+        return "speech" if self is ModelKind.TTS else "transcription"
+
+    @property
     def display_name(self) -> str:
-        return "Kokoro (Speech)" if self is ModelKind.TTS else "Parakeet (Transcription)"
+        return f"{self.model_name} ({self.role})"
+
+    @property
+    def approximate_gb(self) -> float:
+        return self.model.approximate_gb
 
     @property
     def repo(self) -> str:
-        return TTS_REPO if self is ModelKind.TTS else STT_REPO
+        return self.model.repo
+
+    @classmethod
+    def for_family(cls, family: catalog.Family) -> "ModelKind":
+        return cls.TTS if family is catalog.Family.TTS else cls.STT
 
 
 def kinds_for(requested: str) -> list[ModelKind] | None:
-    """The speech kinds a `run` message names, or None if it isn't a speech request."""
-    if requested == "tts":
-        return [ModelKind.TTS]
-    if requested == "stt":
-        return [ModelKind.STT]
-    if requested == "speech":
-        return list(ModelKind)
-    return None
+    """The speech kinds a name refers to, or None if it isn't a speech request.
+
+    Accepts the roles the wire sends (`tts`, `stt`, `speech`) and the model ids
+    the panes display (`kokoro`, `parakeet`), so the name on screen is also a name
+    that works.
+    """
+    models = catalog.resolve_speech(requested or "")
+    if not models:
+        return None
+    return [ModelKind.for_family(m.family) for m in models]
 
 
 def pcm16(samples: np.ndarray) -> bytes:
@@ -191,13 +222,12 @@ class SpeechEngine:
 
     @staticmethod
     def _load_blocking(kind: ModelKind):
-        from mlx_audio.tts.utils import load_model as load_tts
-
         if kind is ModelKind.TTS:
-            return load_tts(TTS_REPO)
+            from mlx_audio.tts.utils import load_model as load_tts
+            return load_tts(kind.repo)
 
         from mlx_audio.stt.utils import load_model as load_stt
-        return load_stt(STT_REPO)
+        return load_stt(kind.repo)
 
     def stop(self, kind: ModelKind) -> None:
         if self._loaded.pop(kind, None) is None:

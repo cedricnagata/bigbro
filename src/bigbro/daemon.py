@@ -27,7 +27,7 @@ from .macos.power import PowerAssertion
 from .protocol.pairing import PairingManager
 from .protocol.server import PeerServer
 from .router import AppRouter
-from .speech import ModelKind, SpeechEngine
+from .speech import ModelKind, SpeechEngine, kinds_for
 
 log = logging.getLogger("bigbro.daemon")
 
@@ -217,7 +217,12 @@ class Daemon:
             "running": running,
             "downloaded": downloaded,
             "speech": {
-                kind.value: self.speech.state_description(kind) for kind in ModelKind
+                kind.value: {
+                    "name": kind.model_name,
+                    "model": kind.model.id,
+                    "state": self.speech.state_description(kind),
+                }
+                for kind in ModelKind
             },
             "memory": memory_probe.report(self.engine.memory_by_model).to_wire(),
         }
@@ -278,47 +283,78 @@ class Daemon:
         self.pairing.mark_disconnected(device_id)
         return {"ok": True, "deviceId": device_id}
 
+    def _model_entry(self, model) -> dict[str, Any]:
+        """One row, with its state read from whichever engine owns it."""
+        if model.family.is_speech:
+            kind = ModelKind.for_family(model.family)
+            state = self.speech.state_description(kind)
+            memory = None
+        else:
+            state = self.engine.state_description(model.id)
+            memory = self.engine.memory_by_model.get(model.id)
+        return {
+            "id": model.id,
+            "name": model.display_name,
+            "family": model.family.value,
+            "state": state,
+            "sizeGB": model.approximate_gb,
+            "tools": model.supports_tools,
+            "images": model.supports_images,
+            "reasoning": model.reasoning.value,
+            "memory": memory,
+        }
+
     async def _control_models_list(self, _request: dict[str, Any]) -> dict[str, Any]:
+        """Grouped by family, because these are not interchangeable.
+
+        A language model has no vision tower and a speech model answers nothing at
+        all, so presenting them as one list invites naming the wrong kind — which
+        fails rather than degrading.
+        """
         return {
             "ok": True,
-            "models": [
+            "groups": [
                 {
-                    "id": model.id,
-                    "name": model.display_name,
-                    "family": model.family.value,
-                    "state": self.engine.state_description(model.id),
-                    "sizeGB": model.approximate_gb,
-                    "tools": model.supports_tools,
-                    "images": model.supports_images,
-                    "reasoning": model.reasoning.value,
+                    "family": family.value,
+                    "label": family.label,
+                    "models": [self._model_entry(m) for m in catalog.models_in(family)],
                 }
-                for model in catalog.ALL_MODELS
-            ],
-            "speech": [
-                {"id": kind.value, "name": kind.display_name, "state": self.speech.state_description(kind)}
-                for kind in ModelKind
+                for family in catalog.Family
             ],
         }
 
     def _lookup(self, request: dict[str, Any]):
+        """Resolves a model name to (name, inference_model, speech_kinds).
+
+        Speech is matched by role (`tts`, `stt`, `speech`) *and* by model id
+        (`kokoro`, `parakeet`), so whatever the panes display can also be typed.
+        """
         name = str(request.get("model") or "")
-        return name, catalog.resolve(name)
+        return name, catalog.resolve(name), kinds_for(name) or []
+
+    @staticmethod
+    def _unknown(name: str) -> dict[str, Any]:
+        return {"ok": False, "error": f"'{name}' is not a model BigBro knows about."}
 
     async def _control_models_download(self, request: dict[str, Any]) -> dict[str, Any]:
-        name, model = self._lookup(request)
-        if model is None:
-            return {"ok": False, "error": f"'{name}' is not a model BigBro knows about."}
-        asyncio.ensure_future(self.router._download_quietly(model))  # noqa: SLF001
-        return {"ok": True, "model": model.id, "started": True}
+        name, model, kinds = self._lookup(request)
+        if model is not None:
+            asyncio.ensure_future(self.router._download_quietly(model))  # noqa: SLF001
+            return {"ok": True, "model": model.id, "started": True}
+        if kinds:
+            for kind in kinds:
+                asyncio.ensure_future(self.speech.download(kind))
+            return {"ok": True, "model": ", ".join(k.model.id for k in kinds), "started": True}
+        return self._unknown(name)
 
     async def _control_models_start(self, request: dict[str, Any]) -> dict[str, Any]:
-        name, model = self._lookup(request)
+        name, model, kinds = self._lookup(request)
         if model is None:
-            kinds = {k.value: k for k in ModelKind}
-            if name in kinds:
-                await self.speech.run(kinds[name])
-                return {"ok": True, "model": name}
-            return {"ok": False, "error": f"'{name}' is not a model BigBro knows about."}
+            if not kinds:
+                return self._unknown(name)
+            for kind in kinds:
+                await self.speech.run(kind)
+            return {"ok": True, "model": ", ".join(k.model.id for k in kinds)}
         # Loading a 12 GB model takes long enough that holding the control reply
         # would look like the UI had frozen. Report state through events instead.
         self._publish_model_state(model.id)
@@ -333,25 +369,25 @@ class Daemon:
         self._publish_model_state(model.id)
 
     async def _control_models_stop(self, request: dict[str, Any]) -> dict[str, Any]:
-        name, model = self._lookup(request)
+        name, model, kinds = self._lookup(request)
         if model is None:
-            kinds = {k.value: k for k in ModelKind}
-            if name in kinds:
-                self.speech.stop(kinds[name])
-                return {"ok": True, "model": name}
-            return {"ok": False, "error": f"'{name}' is not a model BigBro knows about."}
+            if not kinds:
+                return self._unknown(name)
+            for kind in kinds:
+                self.speech.stop(kind)
+            return {"ok": True, "model": ", ".join(k.model.id for k in kinds)}
         self.engine.stop(model.id)
         self._publish_model_state(model.id)
         return {"ok": True, "model": model.id}
 
     async def _control_models_delete(self, request: dict[str, Any]) -> dict[str, Any]:
-        name, model = self._lookup(request)
+        name, model, kinds = self._lookup(request)
         if model is None:
-            kinds = {k.value: k for k in ModelKind}
-            if name in kinds:
-                self.speech.remove(kinds[name])
-                return {"ok": True, "model": name}
-            return {"ok": False, "error": f"'{name}' is not a model BigBro knows about."}
+            if not kinds:
+                return self._unknown(name)
+            for kind in kinds:
+                self.speech.remove(kind)
+            return {"ok": True, "model": ", ".join(k.model.id for k in kinds)}
         self.engine.remove(model)
         self._publish_model_state(model.id)
         return {"ok": True, "model": model.id}
