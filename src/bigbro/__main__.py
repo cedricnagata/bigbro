@@ -191,18 +191,21 @@ def cmd_status(_args: argparse.Namespace) -> int:
     if reply.get("pending"):
         print(f"  pending:     {len(reply['pending'])} awaiting approval — see: bigbro pair list")
     mem = reply.get("memory") or {}
-    if mem.get("resident") is not None:
+    if mem.get("headline"):
         from .macos.memory import human
-        line = f"  memory:      {human(mem['resident'])}"
+        mlx = mem.get("mlx") or {}
+        label = "weights" if mem.get("weights") else "process"
+        line = f"  memory:      {human(mem['headline'])} ({label})"
         if mem.get("total"):
-            line += f" of {human(mem['total'])} ({mem['resident'] / mem['total'] * 100:.0f}%)"
+            line += f" of {human(mem['total'])} ({mem['headline'] / mem['total'] * 100:.0f}%)"
         if mem.get("pressure") and mem["pressure"] != "normal":
             line += f" — pressure {mem['pressure']}"
         print(line)
-        mlx = mem.get("mlx") or {}
         if mlx.get("active"):
-            print(f"    weights:   {human(mlx['active'])} active, {human(mlx.get('cache', 0))} cached"
+            print(f"    mlx:       {human(mlx['active'])} active, {human(mlx.get('cache', 0))} cached"
                   f", {human(mlx.get('peak', 0))} peak")
+        print(f"    process:   {human(mem.get('footprint'))} footprint, "
+              f"{human(mem.get('resident'))} resident")
         for model_id, size in sorted((mem.get("models") or {}).items(), key=lambda kv: -kv[1]):
             print(f"    {model_id:20s} {human(size)}")
     print(f"  running:     {', '.join(reply['running']) or 'nothing'}")

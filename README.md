@@ -150,24 +150,32 @@ gigabytes nothing ever reads — and would inflate the total past anything the d
 `bigbro status` and the dashboard both report what the daemon is holding:
 
 ```
-  memory:      12.8 GB of 36.0 GB (35%)
-    weights:   12.0 GB active, 300.0 MB cached, 12.4 GB peak
-    gpt-oss-20b          12.0 GB
+  memory:      11.2 GB (weights) of 36.0 GB (31%)
+    mlx:       11.2 GB active, 6 KB cached, 11.2 GB peak
+    process:   11.5 GB footprint, 9.4 GB resident
+    gpt-oss-20b          11.2 GB
 ```
 
-Three different numbers, answering three different questions:
+**The headline is MLX's figure, not the process size**, because the process numbers are not
+trustworthy for this. Measured across three loads of the same 12 GB model, resident size read
+1.8 GB once and 11.8 GB on the others, and after unloading it still reported 10.6 GB while MLX
+held 400 KB — the allocator had not handed the pages back. MLX said 11.2 GB every time. Weights
+are what you are asking about when you ask what a model costs, and MLX is the only source that
+answers consistently. With nothing loaded the process figure leads instead, since MLX reporting
+zero would read as bigbro using no memory at all.
 
-- **memory** — the process's resident size, what the Mac has actually given bigbro, against
-  installed RAM. macOS's own pressure verdict is appended when it stops being `normal`; it is
-  reported rather than derived from free pages, because with compression and a dynamic file cache
-  "free" means very little.
-- **weights** — MLX's own accounting. `active` is what it is deliberately holding, `cache` is
-  buffers it keeps between requests, `peak` is the high-water mark. When the gap between the
-  process figure and `active` grows, that gap is cache and activations.
+- **mlx** — `active` is what MLX is deliberately holding, `cache` is buffers kept between
+  requests, `peak` is the high-water mark.
+- **process** — `footprint` is what Activity Monitor shows; `resident` is the kernel's resident
+  size. The gap between these and `active` is cache, activations, and pages not yet returned.
 - **per-model** — measured, not taken from the catalog's approximate size, by reading MLX's
   allocation before and after each model's weights are materialized. Quantized weights vary between
   revisions, and what matters is what this Mac is holding right now. Loads are serialized so two
   models racing cannot be charged each other's weights.
+
+macOS's own pressure verdict is appended when it stops being `normal` — reported rather than
+derived from free pages, because with compression and a dynamic file cache "free" means very
+little.
 
 A stopped model drops out of the per-model list immediately — it is no longer being held.
 

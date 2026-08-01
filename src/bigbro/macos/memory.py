@@ -1,10 +1,16 @@
 """What the daemon is costing in memory, and what the Mac has left.
 
-Two numbers matter here and they answer different questions. The process's
-resident size is what the Mac has actually given bigbro; MLX's active figure is
-how much of that is model weights it is deliberately holding. When a 12 GB model
-is resident those track each other closely, and when they diverge the gap is
-cache and activations — which is exactly the thing worth seeing.
+**MLX's own figure leads, not the process size.** The process numbers are not
+trustworthy for this. Measured across three loads of the same 12 GB model,
+resident size read 1.8 GB once and 11.8 GB on the others, and after unloading it
+still reported 10.6 GB while MLX held 400 KB — the allocator had not returned the
+pages. MLX said 11.2 GB every time. Weights are what a person is asking about
+when they ask what a model costs, and MLX is the only source that answers it
+consistently.
+
+Resident size and `phys_footprint` are still reported, because the gap between
+them and MLX is real information: it is cache, activations and whatever has not
+been handed back yet. They just do not belong in the headline.
 
 Bound with ctypes against libSystem, same as the Bonjour and power-assertion
 bindings, so this adds no dependency. Every reader degrades to None off macOS
@@ -21,6 +27,7 @@ from dataclasses import dataclass, field
 log = logging.getLogger("bigbro.memory")
 
 _MACH_TASK_BASIC_INFO = 20
+_TASK_VM_INFO = 22
 _KERN_SUCCESS = 0
 
 #: kern.memorystatus_vm_pressure_level. macOS reports 1/2/4, not a scale.
@@ -36,6 +43,24 @@ class _MachTaskBasicInfo(ctypes.Structure):
         ("system_time", ctypes.c_int32 * 2),
         ("policy", ctypes.c_int32),
         ("suspend_count", ctypes.c_int32),
+    ]
+
+
+class _TaskVMInfo(ctypes.Structure):
+    """Only as far as `phys_footprint` — the rest of the struct is not read."""
+
+    _fields_ = [
+        ("virtual_size", ctypes.c_uint64), ("region_count", ctypes.c_int32),
+        ("page_size", ctypes.c_int32), ("resident_size", ctypes.c_uint64),
+        ("resident_size_peak", ctypes.c_uint64), ("device", ctypes.c_uint64),
+        ("device_peak", ctypes.c_uint64), ("internal", ctypes.c_uint64),
+        ("internal_peak", ctypes.c_uint64), ("external", ctypes.c_uint64),
+        ("external_peak", ctypes.c_uint64), ("reusable", ctypes.c_uint64),
+        ("reusable_peak", ctypes.c_uint64), ("purgeable_volatile_pmap", ctypes.c_uint64),
+        ("purgeable_volatile_resident", ctypes.c_uint64),
+        ("purgeable_volatile_virtual", ctypes.c_uint64),
+        ("compressed", ctypes.c_uint64), ("compressed_peak", ctypes.c_uint64),
+        ("compressed_lifetime", ctypes.c_uint64), ("phys_footprint", ctypes.c_uint64),
     ]
 
 
@@ -69,6 +94,27 @@ def process_memory() -> tuple[int | None, int | None]:
         return info.resident_size, info.resident_size_max
     except (OSError, ValueError, AttributeError):
         return None, None
+
+
+def process_footprint() -> int | None:
+    """`phys_footprint` — the figure Activity Monitor shows for the process.
+
+    Kept alongside resident size because the two disagree: after a model is
+    unloaded the allocator has not yet returned the pages, so both overstate what
+    is really being held. Neither is the number to lead with — see `MemoryReport`.
+    """
+    lib = _system()
+    if lib is None:
+        return None
+    try:
+        info = _TaskVMInfo()
+        count = ctypes.c_uint32(ctypes.sizeof(_TaskVMInfo) // ctypes.sizeof(ctypes.c_uint32))
+        task = ctypes.c_uint.in_dll(lib, "mach_task_self_")
+        if lib.task_info(task, _TASK_VM_INFO, ctypes.byref(info), ctypes.byref(count)) != _KERN_SUCCESS:
+            return None
+        return info.phys_footprint
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
 def _sysctl(name: str, ctype):
@@ -145,6 +191,7 @@ def human(size: int | None) -> str:
 class MemoryReport:
     resident: int | None = None
     peak: int | None = None
+    footprint: int | None = None
     total: int | None = None
     pressure: str | None = None
     mlx: dict[str, int] = field(default_factory=dict)
@@ -152,25 +199,43 @@ class MemoryReport:
     models: dict[str, int] = field(default_factory=dict)
 
     @property
+    def weights(self) -> int | None:
+        """What MLX is holding — the figure that answers "what do my models cost"."""
+        return self.mlx.get("active")
+
+    @property
+    def headline(self) -> int | None:
+        """Weights when anything is loaded, otherwise the process figure.
+
+        With nothing loaded MLX reports zero, which would read as bigbro using no
+        memory at all rather than as "no models running".
+        """
+        return self.weights or self.footprint or self.resident
+
+    @property
     def fraction_of_ram(self) -> float | None:
-        if not self.resident or not self.total:
+        headline = self.headline
+        if not headline or not self.total:
             return None
-        return self.resident / self.total
+        return headline / self.total
 
     def to_wire(self) -> dict:
         return {
             "resident": self.resident,
             "peak": self.peak,
+            "footprint": self.footprint,
             "total": self.total,
             "pressure": self.pressure,
             "mlx": self.mlx,
             "models": self.models,
+            "headline": self.headline,
+            "weights": self.weights,
         }
 
     def summary(self) -> str:
         """One line, for the dashboard's status bar."""
         share = self.fraction_of_ram
-        text = human(self.resident)
+        text = human(self.headline)
         if share is not None:
             text += f" of {human(self.total)} ({share * 100:.0f}%)"
         if self.pressure and self.pressure != "normal":
@@ -183,6 +248,7 @@ def report(models: dict[str, int] | None = None) -> MemoryReport:
     return MemoryReport(
         resident=resident,
         peak=peak,
+        footprint=process_footprint(),
         total=total_memory(),
         pressure=pressure(),
         mlx=mlx_memory(),

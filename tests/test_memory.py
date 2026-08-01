@@ -122,12 +122,13 @@ def test_summary_survives_a_reading_it_could_not_take():
 
 def test_report_round_trips_to_the_wire():
     wire = mem.MemoryReport(
-        resident=100, peak=200, total=300, pressure="normal",
+        resident=100, peak=200, footprint=150, total=300, pressure="normal",
         mlx={"active": 50}, models={"qwen3-4b": 40},
     ).to_wire()
     assert wire == {
-        "resident": 100, "peak": 200, "total": 300, "pressure": "normal",
-        "mlx": {"active": 50}, "models": {"qwen3-4b": 40},
+        "resident": 100, "peak": 200, "footprint": 150, "total": 300,
+        "pressure": "normal", "mlx": {"active": 50}, "models": {"qwen3-4b": 40},
+        "headline": 50, "weights": 50,
     }
 
 
@@ -162,3 +163,43 @@ def test_active_memory_reader_is_zero_without_mlx(monkeypatch):
 
     monkeypatch.delitem(sys.modules, "mlx.core", raising=False)
     assert _mlx_active_memory() == 0
+
+
+# MARK: - Which number leads
+#
+# The process figures are not trustworthy for "what is this model costing".
+# Measured across three loads of the same 12 GB model, resident size read 1.8 GB
+# once and 11.8 GB on the others, and after unloading it still reported 10.6 GB
+# while MLX held 400 KB. MLX said 11.2 GB every time.
+
+
+def test_weights_lead_when_a_model_is_loaded():
+    report = mem.MemoryReport(
+        resident=1_800_000_000, footprint=1_700_000_000, total=36_000_000_000,
+        mlx={"active": 11_200_000_000},
+    )
+    assert report.headline == 11_200_000_000
+    assert "10.4 GB" in report.summary()
+
+
+def test_the_process_figure_leads_when_nothing_is_loaded():
+    """MLX reports zero with nothing loaded, which would read as "using nothing"."""
+    report = mem.MemoryReport(resident=40_000_000, footprint=35_000_000, total=36_000_000_000)
+    assert report.headline == 35_000_000
+
+
+def test_a_stale_process_figure_does_not_inflate_the_headline():
+    """After unload the allocator has not returned the pages; MLX has."""
+    report = mem.MemoryReport(
+        resident=10_600_000_000, footprint=10_600_000_000, total=36_000_000_000,
+        mlx={"active": 400_000},
+    )
+    assert report.headline == 400_000
+
+
+def test_share_of_ram_is_computed_from_the_headline():
+    report = mem.MemoryReport(
+        resident=1_000, footprint=1_000, total=36_000_000_000,
+        mlx={"active": 18_000_000_000},
+    )
+    assert report.fraction_of_ram == pytest.approx(0.5)

@@ -506,11 +506,11 @@ class BigBroApp(App):
             f"{len(running)} model(s) running"
         )
         mem = self._status.get("memory") or {}
-        if mem.get("resident") is not None:
-            share = (
-                f" ({mem['resident'] / mem['total'] * 100:.0f}%)" if mem.get("total") else ""
-            )
-            bar += f"  ·  {human(mem['resident'])}{share}"
+        headline = mem.get("headline")
+        if headline:
+            share = f" ({headline / mem['total'] * 100:.0f}%)" if mem.get("total") else ""
+            label = "weights" if mem.get("weights") else "process"
+            bar += f"  ·  {label} {human(headline)}{share}"
             if mem.get("pressure") and mem["pressure"] != "normal":
                 bar += f" pressure {mem['pressure']}"
         bar_widget = self._find("#status-bar", Static)
