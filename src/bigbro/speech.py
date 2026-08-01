@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import pathlib
+import queue
 import struct
 from enum import Enum
 from typing import AsyncIterator
@@ -37,6 +38,9 @@ CHUNK_BYTES = 8 * 1024
 DEFAULT_VOICE = "af_heart"
 
 _WAV_HEADER_BYTES = 44
+
+#: Pushed onto the bridge when a synthesis run finishes.
+_SYNTHESIS_DONE = object()
 
 
 class SpeechError(Exception):
@@ -325,32 +329,66 @@ class SpeechEngine:
     async def synthesize(
         self, text: str, voice: str | None = None, speed: float | None = None
     ) -> AsyncIterator[bytes]:
-        """Streams 24 kHz 16-bit mono PCM in ~8 KB chunks."""
+        """Streams 24 kHz 16-bit mono PCM in ~8 KB chunks, as it is produced.
+
+        Kokoro splits long text into segments and yields each as it finishes, so
+        audio is forwarded per segment rather than after the whole utterance is
+        synthesized. For a paragraph that is the difference between the first word
+        arriving in a second and arriving when the last one is ready — and the
+        client is playing it back as it lands.
+        """
         model = await self.run(ModelKind.TTS)
         chosen_voice = voice or DEFAULT_VOICE
+        rate = speed or 1.0
+
+        bridge: queue.Queue = queue.Queue(maxsize=64)
+        loop = asyncio.get_running_loop()
+        spoken = 0
 
         async with self._lock:
-            audio = await mlx_thread.run(
-                self._synthesize_blocking, model, text, chosen_voice, speed or 1.0
+            pending = mlx_thread.submit(
+                mlx_thread.drain_to_queue,
+                lambda: self._synthesize_segments(model, text, chosen_voice, rate),
+                bridge,
+                _SYNTHESIS_DONE,
             )
+            buffer = bytearray()
+            try:
+                while True:
+                    item = await loop.run_in_executor(None, bridge.get)
+                    if item is _SYNTHESIS_DONE:
+                        break
+                    if isinstance(item, BaseException):
+                        raise item
+                    buffer += item
+                    spoken += len(item)
+                    while len(buffer) >= CHUNK_BYTES:
+                        yield bytes(buffer[:CHUNK_BYTES])
+                        del buffer[:CHUNK_BYTES]
+                if buffer:
+                    yield bytes(buffer)
+            finally:
+                # The MLX worker is shared; a half-drained synthesis would leave the
+                # next request reading someone else's audio.
+                await asyncio.wrap_future(pending)
 
-        raw = pcm16(audio)
-        for start in range(0, len(raw), CHUNK_BYTES):
-            yield raw[start:start + CHUNK_BYTES]
-
-    @staticmethod
-    def _synthesize_blocking(model, text: str, voice: str, speed: float) -> np.ndarray:
-        segments = []
-        for result in model.generate(text=text, voice=voice, speed=speed):
-            audio = getattr(result, "audio", result)
-            segments.append(np.asarray(audio, dtype=np.float32).reshape(-1))
-        if not segments:
-            # Reached only for input the router's own check let through — text that
-            # is non-empty but has nothing speakable in it.
+        if spoken == 0:
+            log.error(
+                "%s produced no audio: voice=%s speed=%s chars=%d text=%r",
+                ModelKind.TTS.model_name, chosen_voice, rate, len(text), text[:200],
+            )
             raise SpeechError(
                 f"{ModelKind.TTS.model_name} had nothing to say for that input."
             )
-        return np.concatenate(segments)
+
+    @staticmethod
+    def _synthesize_segments(model, text: str, voice: str, speed: float):
+        """Yields PCM for each segment Kokoro finishes. Runs on the MLX thread."""
+        for result in model.generate(text=text, voice=voice, speed=speed):
+            audio = getattr(result, "audio", result)
+            samples = np.asarray(audio, dtype=np.float32).reshape(-1)
+            if samples.size:
+                yield pcm16(samples)
 
     # MARK: - Transcription
 

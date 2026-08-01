@@ -252,6 +252,15 @@ Voice selection (which Kokoro speaker to use) is a BigBroKit parameter, not a Ma
 Synthesized audio is always 24 kHz 16-bit mono PCM — the only format Kokoro produces, and what
 BigBroKit's `BigBroAudioPlayer` expects.
 
+It is forwarded as Kokoro produces it, not after the whole utterance is synthesized. Kokoro splits
+long text into segments and finishes them in order, so each is chunked onto the wire as it lands:
+for a 2,800-character answer the first audio arrives in 0.9 s while synthesis runs for another
+4 s behind it. Short replies synthesize far faster than real time — 23 s of speech in 0.7 s — so
+there the distinction does not matter.
+
+Note that `streaming` on `request` / `generateRequest` is about *text*, and governs client-side
+accumulation rather than what the Mac sends. Speech is a separate request and is always chunked.
+
 Uploaded audio can be `wav`, headerless `pcm`, or any container CoreAudio reads — `m4a` above all,
 since that is what `AVAudioRecorder` produces by default and therefore what an iOS app records
 without being told otherwise. Anything compressed is decoded with `afconvert`, which ships with
