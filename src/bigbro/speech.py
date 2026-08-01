@@ -23,7 +23,7 @@ from typing import AsyncIterator
 import numpy as np
 
 from .inference import catalog
-from .inference.downloader import DownloadRecord, hub_repository_root
+from .inference.downloader import ModelDownloader
 
 log = logging.getLogger("bigbro.speech")
 
@@ -153,8 +153,15 @@ def float_samples(audio: bytes, audio_format: str) -> np.ndarray:
 class SpeechEngine:
     """Kokoro TTS and Parakeet STT, with the same lifecycle as a catalog model."""
 
-    def __init__(self, record: DownloadRecord | None = None) -> None:
-        self.record = record or DownloadRecord()
+    def __init__(self, downloader: "ModelDownloader | None" = None) -> None:
+        # The same downloader the language and vision models use. Fetching these
+        # separately is what left them with no progress at all: the shared one
+        # carries the tqdm plumbing, the up-front size, the allow_patterns and the
+        # progress callback the daemon publishes from.
+        from .inference.downloader import ModelDownloader
+
+        self.downloader = downloader or ModelDownloader()
+        self.record = self.downloader.record
         self._loaded: dict[ModelKind, object] = {}
         self._load_tasks: dict[ModelKind, asyncio.Task] = {}
         self._errors: dict[ModelKind, str] = {}
@@ -167,7 +174,7 @@ class SpeechEngine:
         return kind in self._loaded
 
     def is_downloaded(self, kind: ModelKind) -> bool:
-        return kind in self._loaded or self.record.is_downloaded(f"speech.{kind.value}")
+        return kind in self._loaded or self.record.is_downloaded(kind.model.id)
 
     def is_busy(self, kind: ModelKind) -> bool:
         return kind in self._load_tasks
@@ -177,6 +184,11 @@ class SpeechEngine:
             return "running"
         if kind in self._errors:
             return f"error: {self._errors[kind]}"
+        if self.downloader.is_downloading(kind.model.id):
+            progress = self.downloader.progress(kind.model.id)
+            if progress is not None and progress.bytes_total:
+                return f"downloading {round(progress.fraction * 100)}%"
+            return "downloading"
         if kind in self._load_tasks:
             return "starting"
         return "downloaded" if self.is_downloaded(kind) else "not downloaded"
@@ -184,10 +196,8 @@ class SpeechEngine:
     # MARK: - Lifecycle
 
     async def download(self, kind: ModelKind) -> None:
-        from huggingface_hub import snapshot_download
-        directory = await asyncio.to_thread(snapshot_download, kind.repo)
-        self.record.record(f"speech.{kind.value}", directory)
-        log.info("downloaded %s", kind.display_name)
+        """Fetches the weights, reporting progress like any other model."""
+        await self.downloader.download(kind.model)
 
     async def run(self, kind: ModelKind):
         loaded = self._loaded.get(kind)
@@ -241,19 +251,8 @@ class SpeechEngine:
             pass
 
     def remove(self, kind: ModelKind) -> None:
-        import shutil
-
         self.stop(kind)
-        key = f"speech.{kind.value}"
-        directory = self.record.path(key)
-        if directory is None:
-            self.record.forget(key)
-            return
-        target = hub_repository_root(directory) or directory
-        if target.exists():
-            shutil.rmtree(target, ignore_errors=True)
-            log.info("removed %s from %s", kind.display_name, target)
-        self.record.forget(key)
+        self.downloader.remove(kind.model)
 
     # MARK: - Synthesis
 

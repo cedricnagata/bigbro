@@ -50,7 +50,7 @@ class Daemon:
         self.events = EventBus()
         self.downloader = ModelDownloader()
         self.engine = MLXEngine(self.downloader)
-        self.speech = SpeechEngine(self.downloader.record)
+        self.speech = SpeechEngine(self.downloader)
         self.pairing = PairingManager()
         self.server = PeerServer()
         self.advertiser = BonjourAdvertiser()
@@ -145,7 +145,7 @@ class Daemon:
             fraction=progress.fraction,
             done=progress.done,
             error=progress.error,
-            state=self.engine.state_description(model_id),
+            state=self._state_of(model_id),
         )
 
         if self._loop is not None:
@@ -169,10 +169,20 @@ class Daemon:
             connected=self.server.connected_device_ids,
         )
 
+    def _state_of(self, model_id: str) -> str:
+        """A model's state, from whichever engine owns it.
+
+        Speech models are not in MLXEngine's bookkeeping, so asking it about
+        Kokoro would answer from the download record alone and never report
+        "running".
+        """
+        model = next((m for m in catalog.EVERY_MODEL if m.id == model_id), None)
+        if model is not None and model.family.is_speech:
+            return self.speech.state_description(ModelKind.for_family(model.family))
+        return self.engine.state_description(model_id)
+
     def _publish_model_state(self, model_id: str) -> None:
-        self.events.publish(
-            "model.state", model=model_id, state=self.engine.state_description(model_id)
-        )
+        self.events.publish("model.state", model=model_id, state=self._state_of(model_id))
 
     # MARK: - Control commands
 
@@ -286,8 +296,7 @@ class Daemon:
     def _model_entry(self, model) -> dict[str, Any]:
         """One row, with its state read from whichever engine owns it."""
         if model.family.is_speech:
-            kind = ModelKind.for_family(model.family)
-            state = self.speech.state_description(kind)
+            state = self.speech.state_description(ModelKind.for_family(model.family))
             memory = None
         else:
             state = self.engine.state_description(model.id)

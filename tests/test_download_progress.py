@@ -263,3 +263,150 @@ def test_sizing_without_patterns_counts_everything(monkeypatch):
 
     monkeypatch.setattr("huggingface_hub.HfApi", FakeApi)
     assert module.repo_total_bytes("some/repo") == 15
+
+
+# MARK: - Speech
+#
+# Speech fetched itself with a bare `snapshot_download`, bypassing all of the
+# above: no tqdm shim, no up-front size, no allow_patterns and no progress
+# callback. The models downloaded, but nothing ever said so — the row sat at
+# "not downloaded" until it flipped to "downloaded".
+
+
+@pytest.mark.parametrize("model_id", ["kokoro", "parakeet"])
+async def test_speech_downloads_report_progress(tmp_path, monkeypatch, model_id):
+    from bigbro.inference.catalog import model as catalog_model
+    from bigbro.speech import ModelKind, SpeechEngine
+
+    monkeypatch.setenv("BIGBRO_HOME", str(tmp_path))
+    downloader = ModelDownloader()
+    speech = SpeechEngine(downloader)
+
+    seen = []
+    downloader.on_progress = lambda mid, progress: seen.append((mid, progress))
+    await _download_via(downloader, monkeypatch, FakeHub())
+
+    kind = next(k for k in ModelKind if k.model.id == model_id)
+    seen.clear()
+    await speech.download(kind)
+
+    assert seen, "a speech download reported nothing at all"
+    assert {mid for mid, _ in seen} == {model_id}
+    fractions = [p.fraction for _, p in seen if p.status == "downloading"]
+    assert fractions and max(fractions) > 0.5
+    assert catalog_model(model_id) is None  # speech is not an inference model
+
+
+async def _download_via(downloader, monkeypatch, hub):
+    """Points the downloader at a fake Hub without running a download."""
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", hub, raising=False)
+    monkeypatch.setattr("bigbro.inference.downloader.repo_total_bytes", lambda *_a: 700_000_000)
+    monkeypatch.setattr("bigbro.inference.downloader.PROGRESS_INTERVAL", 0.0)
+
+
+async def test_a_speech_download_in_flight_shows_a_percentage(tmp_path, monkeypatch):
+    """`state_description` had no downloading state, so the row never moved."""
+    from bigbro.inference.downloader import Progress
+    from bigbro.speech import ModelKind, SpeechEngine
+
+    monkeypatch.setenv("BIGBRO_HOME", str(tmp_path))
+    downloader = ModelDownloader()
+    speech = SpeechEngine(downloader)
+
+    assert speech.state_description(ModelKind.TTS) == "not downloaded"
+
+    # Simulate the downloader mid-flight.
+    downloader._tasks["kokoro"] = object()          # noqa: SLF001
+    downloader._progress["kokoro"] = Progress("downloading", 350_000_000, 700_000_000)  # noqa: SLF001
+    assert speech.state_description(ModelKind.TTS) == "downloading 50%"
+
+
+async def test_speech_uses_the_catalog_id_as_its_record_key(tmp_path, monkeypatch):
+    """It used to record under "speech.tts", which no other code path looks up."""
+    from bigbro.speech import ModelKind, SpeechEngine
+
+    monkeypatch.setenv("BIGBRO_HOME", str(tmp_path))
+    speech = SpeechEngine(ModelDownloader())
+    speech.downloader.record.record("kokoro", tmp_path / "weights")
+    (tmp_path / "weights").mkdir()
+
+    assert speech.is_downloaded(ModelKind.TTS) is True
+    assert speech.is_downloaded(ModelKind.STT) is False
+
+
+async def test_legacy_speech_records_are_migrated(tmp_path, monkeypatch):
+    """Records predate speech becoming catalog entries; nothing reads the old key.
+
+    Left alone, a Mac that already has Parakeet on disk reads as not having it and
+    silently re-downloads 2.5 GB.
+    """
+    from bigbro.config import JSONStore, support_dir
+    from bigbro.inference.downloader import DownloadRecord
+
+    monkeypatch.setenv("BIGBRO_HOME", str(tmp_path))
+    weights = tmp_path / "parakeet-weights"
+    weights.mkdir()
+
+    JSONStore(support_dir() / "downloads.json").update({
+        "speech.stt": str(weights),
+        "speech.tts": str(tmp_path / "gone"),   # path no longer on disk
+    })
+
+    record = DownloadRecord()
+    assert record.is_downloaded("parakeet") is True
+    assert record.path("parakeet") == weights
+    # The vanished one is dropped rather than carried forward as a false positive.
+    assert record.is_downloaded("kokoro") is False
+    assert record.path("speech.stt") is None
+    assert record.path("speech.tts") is None
+
+
+async def test_migration_does_not_overwrite_a_current_record(tmp_path, monkeypatch):
+    from bigbro.config import JSONStore, support_dir
+    from bigbro.inference.downloader import DownloadRecord
+
+    monkeypatch.setenv("BIGBRO_HOME", str(tmp_path))
+    current, legacy = tmp_path / "new", tmp_path / "old"
+    current.mkdir(); legacy.mkdir()
+
+    JSONStore(support_dir() / "downloads.json").update({
+        "kokoro": str(current), "speech.tts": str(legacy),
+    })
+    assert DownloadRecord().path("kokoro") == current
+
+
+@pytest.mark.parametrize("model_id,weight_file", [
+    ("kokoro", "kokoro-v1_0.safetensors"),
+    ("kokoro", "voices/af_heart.safetensors"),
+    ("kokoro", "voices/bf_isabella.pt"),
+    ("parakeet", "model.safetensors"),
+    ("parakeet", "tokenizer.model"),
+    ("parakeet", "tokenizer.vocab"),
+])
+def test_speech_patterns_match_the_files_these_models_actually_ship(model_id, weight_file):
+    """The language patterns silently excluded every one of these.
+
+    `model*.safetensors` does not match `kokoro-v1_0.safetensors`, so the download
+    fetched 2 KB of config and reported itself complete.
+    """
+    from fnmatch import fnmatch
+    from bigbro.inference.catalog import model as catalog_model
+    from bigbro.inference.downloader import patterns_for
+
+    entry = next(m for m in __import__(
+        "bigbro.inference.catalog", fromlist=["SPEECH_MODELS"]
+    ).SPEECH_MODELS if m.id == model_id)
+    assert any(fnmatch(weight_file, p) for p in patterns_for(entry)), weight_file
+    assert catalog_model(model_id) is None
+
+
+def test_kokoros_pytorch_duplicate_is_not_fetched():
+    """327 MB of weights already being fetched as safetensors."""
+    from fnmatch import fnmatch
+    from bigbro.inference.catalog import SPEECH_MODELS
+    from bigbro.inference.downloader import patterns_for
+
+    kokoro = next(m for m in SPEECH_MODELS if m.id == "kokoro")
+    assert not any(fnmatch("kokoro-v1_0.pth", p) for p in patterns_for(kokoro))

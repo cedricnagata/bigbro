@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import pathlib
 import shutil
 import time
 from fnmatch import fnmatch
@@ -49,8 +50,28 @@ class DownloadRecord:
     returned.
     """
 
+    #: Keys written before speech models became catalog entries.
+    LEGACY_KEYS = {"speech.tts": "kokoro", "speech.stt": "parakeet"}
+
     def __init__(self) -> None:
         self._store = JSONStore(support_dir() / "downloads.json")
+        self._migrate_legacy_keys()
+
+    def _migrate_legacy_keys(self) -> None:
+        """Renames records written under the old `speech.tts` / `speech.stt` keys.
+
+        Without this a Mac that already has Parakeet on disk reads as not having
+        it and silently re-downloads 2.5 GB, because nothing looks up the old key
+        any more.
+        """
+        for legacy, current in self.LEGACY_KEYS.items():
+            path = self._store.get(legacy)
+            if path is None:
+                continue
+            if self._store.get(current) is None and pathlib.Path(path).exists():
+                self._store.set(current, path)
+                log.info("migrated download record %s -> %s", legacy, current)
+            self._store.delete(legacy)
 
     def path(self, model_id: str) -> Path | None:
         raw = self._store.get(model_id)
@@ -128,11 +149,28 @@ LANGUAGE_PATTERNS = (
 VISION_PATTERNS = (
     "*.json", "*.safetensors", "*.py", "*.model", "*.tiktoken", "*.txt", "*.jinja",
 )
+# Speech needs its own set, and getting it from the language list is what broke
+# these entirely: Kokoro's weights are `kokoro-v1_0.safetensors`, which
+# `model*.safetensors` does not match, and its `voices/` embeddings match nothing
+# at all — so the download fetched 2 KB of config and reported itself complete.
+#
+# Taken from mlx_audio's own file list, plus the tokenizer files Parakeet needs.
+# `*.safetensors` and `*.pt` match at any depth, which is what picks up `voices/`.
+# The only thing deliberately left behind is Kokoro's `.pth`, a 327 MB PyTorch
+# copy of weights already fetched as safetensors.
+SPEECH_PATTERNS = (
+    "*.json", "*.safetensors", "*.pt", "*.py", "*.txt",
+    "*.yaml", "*.jinja", "*.model", "*.vocab", "*.wav",
+)
 
 
 def patterns_for(model: BigBroModel) -> list[str]:
     """The `allow_patterns` the loader for this model's family would use."""
-    return list(VISION_PATTERNS if model.family is Family.VISION else LANGUAGE_PATTERNS)
+    if model.family.is_speech:
+        return list(SPEECH_PATTERNS)
+    if model.family is Family.VISION:
+        return list(VISION_PATTERNS)
+    return list(LANGUAGE_PATTERNS)
 
 
 def repo_total_bytes(repo: str, patterns: list[str] | None = None) -> int:
