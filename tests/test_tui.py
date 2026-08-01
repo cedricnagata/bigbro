@@ -17,7 +17,7 @@ import pytest
 
 from bigbro.control import ControlServer
 from bigbro.events import EventBus
-from bigbro.tui import BigBroApp, PairingPrompt
+from bigbro.tui import BigBroApp, ConfirmPrompt, PairingPrompt
 
 
 class StubDaemon:
@@ -599,3 +599,78 @@ async def test_download_progress_updates_the_state_cell_not_another_column(daemo
 
         assert await _settled(pilot, lambda: "50%" in cells()[0]), "state cell did not update"
         assert "50%" not in cells()[1], "progress leaked into the memory column"
+
+
+# MARK: - Destructive actions
+#
+# Driven with real keypresses. The delete path shipped broken because the tests
+# called the control command directly and never pressed the key — `push_screen_wait`
+# raises NoActiveWorker outside a worker, so the confirm dialog took the whole
+# dashboard down with a traceback.
+
+
+async def test_delete_key_confirms_then_deletes_the_model(daemon):
+    from textual.widgets import DataTable
+
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        table = app.query_one("#language-table", DataTable)
+        await _settled(pilot, lambda: table.row_count == 3)
+        await pilot.press("2")
+        await _settled(pilot, lambda: table.has_focus)
+        table.move_cursor(row=0)  # qwen3-4b
+
+        await pilot.press("delete")
+        assert await _settled(pilot, lambda: isinstance(app.screen, ConfirmPrompt)), \
+            "no confirmation appeared"
+
+        await pilot.press("enter")
+        assert await _settled(
+            pilot, lambda: any(c.get("command") == "models.delete" for c in daemon.calls)
+        )
+        assert next(c for c in daemon.calls if c["command"] == "models.delete")["model"] == "qwen3-4b"
+
+
+async def test_escaping_the_confirmation_deletes_nothing(daemon):
+    from textual.widgets import DataTable
+
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        table = app.query_one("#language-table", DataTable)
+        await _settled(pilot, lambda: table.row_count == 3)
+        await pilot.press("2")
+        await _settled(pilot, lambda: table.has_focus)
+
+        await pilot.press("delete")
+        await _settled(pilot, lambda: isinstance(app.screen, ConfirmPrompt))
+        await pilot.press("escape")
+
+        await _settled(pilot, lambda: not isinstance(app.screen, ConfirmPrompt))
+        assert not any(c.get("command") == "models.delete" for c in daemon.calls)
+
+
+async def test_delete_key_forgets_a_device_from_the_devices_pane(daemon):
+    from textual.widgets import DataTable
+
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        table = app.query_one("#devices-table", DataTable)
+        await _settled(pilot, lambda: table.row_count >= 1)
+        await pilot.press("1")
+        await _settled(pilot, lambda: table.has_focus)
+
+        await pilot.press("delete")
+        assert await _settled(pilot, lambda: isinstance(app.screen, ConfirmPrompt))
+        await pilot.press("enter")
+
+        assert await _settled(
+            pilot, lambda: any(c.get("command") == "pair.remove" for c in daemon.calls)
+        )
+
+
+async def test_the_tab_underline_does_not_animate(daemon):
+    """It slides over 0.3s, which reads as lag on something scanned at a glance."""
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        await _settled(pilot, lambda: "status" in daemon.commands())
+        assert app.animation_level == "none"

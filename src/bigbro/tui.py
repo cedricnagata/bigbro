@@ -253,6 +253,11 @@ class BigBroApp(App):
         #: Set by `serve` when the daemon task dies, so the reason survives the UI
         #: coming down and can be reported instead of a bare socket-not-found.
         self.daemon_error: BaseException | None = None
+        # The tab underline slides to its new position over 0.3s. On a dashboard
+        # that is read at a glance it reads as lag rather than polish — the pane
+        # has already changed while the marker is still travelling. The underline
+        # stays as the active-tab marker; only the journey goes.
+        self.animation_level = "none"
         self._status: dict[str, Any] = {}
         self._devices: list[dict[str, Any]] = []
         self._settings: dict[str, Any] = {}
@@ -642,8 +647,13 @@ class BigBroApp(App):
         if key and key.startswith("pending:"):
             self.resolve_pairing(key.split(":", 1)[1], True)
 
+    @work
     async def action_delete_selected(self) -> None:
         """Deletes the selected model's weights, or forgets the selected device.
+
+        A worker because `push_screen_wait` requires one: awaiting a modal from a
+        plain action raises NoActiveWorker and takes the dashboard down with a
+        traceback, which is a poor way to learn you meant to confirm something.
 
         Both are destructive and irreversible over a slow download, so both
         confirm first.
