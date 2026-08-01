@@ -600,14 +600,28 @@ class BigBroApp(App):
                 state = f"downloading {round((event.get('fraction') or 0) * 100)}%"
 
         family = None
+        moved = False
         for candidate, models in self._groups.items():
             for model in models:
                 if model.get("id") == model_id:
+                    # Rows are ordered by how far along a model is, so a real stage
+                    # change has to re-sort. Comparing the leading word keeps the
+                    # twice-a-second progress ticks from rebuilding the table.
+                    previous = str(model.get("state") or "").split()[:1]
+                    current = str(state or "").split()[:1]
+                    moved = bool(state) and previous != current
                     model["state"] = state or model.get("state")
                     family = candidate
                     break
             if family:
                 break
+
+        if moved:
+            # Ordering is the daemon's, so a stage change is re-fetched rather than
+            # re-sorted here — one ranking, in one place. Stage changes are rare;
+            # the progress ticks below never take this path.
+            self.call_later(self.action_refresh)
+            return
 
         column = self._state_columns.get(family) if family else None
         if column is None:

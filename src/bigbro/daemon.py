@@ -293,6 +293,26 @@ class Daemon:
         self.pairing.mark_disconnected(device_id)
         return {"ok": True, "deviceId": device_id}
 
+    #: How far along a model is, for ordering. What is usable comes first, what would
+    #: cost a download comes last, and the transient states sit between in the order
+    #: they actually happen.
+    _STATE_RANK = {
+        "running": 0,
+        "starting": 1,
+        "downloading": 2,
+        "downloaded": 3,
+        "error": 4,
+        "not downloaded": 5,
+    }
+
+    @classmethod
+    def _state_rank(cls, state: str) -> int:
+        """Rank for a state description, which may carry a percentage or a message."""
+        for prefix, rank in cls._STATE_RANK.items():
+            if state.startswith(prefix):
+                return rank
+        return len(cls._STATE_RANK)
+
     def _model_entry(self, model) -> dict[str, Any]:
         """One row, with its state read from whichever engine owns it."""
         if model.family.is_speech:
@@ -326,7 +346,13 @@ class Daemon:
                 {
                     "family": family.value,
                     "label": family.label,
-                    "models": [self._model_entry(m) for m in catalog.models_in(family)],
+                    # Sorted here rather than in each renderer, so the CLI and every
+                    # pane agree. `sorted` is stable, so models at the same stage keep
+                    # their catalog order — which is curated, not alphabetical.
+                    "models": sorted(
+                        (self._model_entry(m) for m in catalog.models_in(family)),
+                        key=lambda entry: self._state_rank(entry["state"]),
+                    ),
                 }
                 for family in catalog.Family
             ],

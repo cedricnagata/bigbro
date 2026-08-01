@@ -98,6 +98,15 @@ class StubDaemon:
             return {"ok": True, "message": "saved", "settings": self.settings}
         return {"ok": False, "error": f"unknown command '{command}'"}
 
+    def sort_like_the_daemon(self) -> None:
+        """Mirrors the daemon's ordering, which is where sorting actually happens."""
+        from bigbro.daemon import Daemon
+
+        for group in ("models", "vision", "tts", "stt"):
+            setattr(self, group, sorted(
+                getattr(self, group), key=lambda e: Daemon._state_rank(e["state"])
+            ))
+
     def commands(self) -> list[str]:
         return [c.get("command") for c in self.calls]
 
@@ -291,6 +300,11 @@ async def test_download_progress_updates_state_without_a_full_reload(daemon):
     async with app.run_test() as pilot:
         await _settled(pilot, lambda: daemon.bus.subscriber_count == 1)
         await _settled(pilot, lambda: bool(app._groups.get("language")))
+
+        # Already downloading, so what follows is a tick within a stage rather than a
+        # transition into one. Transitions re-fetch, because the ordering changes with them.
+        next(m for m in daemon.models if m["id"] == "qwen3-4b")["state"] = "downloading 10%"
+        await app.action_refresh()
 
         before = len(daemon.calls)
         daemon.bus.publish(
@@ -591,6 +605,10 @@ async def test_download_progress_updates_the_state_cell_not_another_column(daemo
                        if str(table.get_cell_at((r, 0))) == "qwen3-4b")
             return str(table.get_cell_at((row, 3))), str(table.get_cell_at((row, 4)))
 
+        # Already downloading, so the event below is a tick rather than a transition.
+        next(m for m in daemon.models if m["id"] == "qwen3-4b")["state"] = "downloading 10%"
+        await app.action_refresh()
+
         daemon.bus.publish(
             "download.progress", model="qwen3-4b", status="downloading",
             completed=1_200_000_000, total=2_400_000_000, fraction=0.5,
@@ -734,3 +752,90 @@ async def test_the_status_follows_a_device_disconnecting(daemon):
                            name="iPhone", connected=[])
 
         assert await _settled(pilot, lambda: str(table.get_cell_at((0, 4))) == "offline")
+
+
+# MARK: - Ordering
+#
+# Rows are ordered by how far along a model is: what is usable first, what would
+# cost a download last. Sorted daemon-side so the CLI and every pane agree.
+
+
+async def test_models_are_ordered_by_lifecycle_stage(daemon):
+    from textual.widgets import DataTable
+
+    daemon.models = [
+        {"id": "not-yet", "name": "A", "family": "language", "state": "not downloaded",
+         "sizeGB": 1.0, "tools": False, "images": False, "reasoning": "none", "memory": None},
+        {"id": "on-disk", "name": "B", "family": "language", "state": "downloaded",
+         "sizeGB": 1.0, "tools": False, "images": False, "reasoning": "none", "memory": None},
+        {"id": "in-memory", "name": "C", "family": "language", "state": "running",
+         "sizeGB": 1.0, "tools": False, "images": False, "reasoning": "none", "memory": 100},
+    ]
+    daemon.sort_like_the_daemon()
+
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        table = app.query_one("#language-table", DataTable)
+        assert await _settled(pilot, lambda: table.row_count == 3)
+        order = [str(table.get_cell_at((r, 0))) for r in range(3)]
+        assert order == ["in-memory", "on-disk", "not-yet"]
+
+
+async def test_a_stage_change_reorders_without_waiting_for_the_poll(daemon):
+    """Starting a model should lift it immediately, not in five seconds."""
+    from textual.widgets import DataTable
+
+    daemon.models = [
+        {"id": "not-yet", "name": "A", "family": "language", "state": "not downloaded",
+         "sizeGB": 1.0, "tools": False, "images": False, "reasoning": "none", "memory": None},
+        {"id": "on-disk", "name": "B", "family": "language", "state": "downloaded",
+         "sizeGB": 1.0, "tools": False, "images": False, "reasoning": "none", "memory": None},
+    ]
+    daemon.sort_like_the_daemon()
+
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        table = app.query_one("#language-table", DataTable)
+        assert await _settled(pilot, lambda: table.row_count == 2)
+        assert [str(table.get_cell_at((r, 0))) for r in range(2)] == ["on-disk", "not-yet"]
+
+        await _settled(pilot, lambda: daemon.bus.subscriber_count == 1)
+        # As a real daemon would: the state changes, then it announces it.
+        next(m for m in daemon.models if m["id"] == "not-yet")["state"] = "running"
+        daemon.sort_like_the_daemon()
+        daemon.bus.publish("model.state", model="not-yet", state="running")
+
+        assert await _settled(
+            pilot,
+            lambda: [str(table.get_cell_at((r, 0))) for r in range(2)] == ["not-yet", "on-disk"],
+        )
+
+
+async def test_a_progress_tick_does_not_reorder(daemon):
+    """Download percentages arrive twice a second; rebuilding on each would flicker."""
+    from textual.widgets import DataTable
+
+    daemon.models = [
+        {"id": "pulling", "name": "A", "family": "language", "state": "downloading 10%",
+         "sizeGB": 1.0, "tools": False, "images": False, "reasoning": "none", "memory": None},
+        {"id": "on-disk", "name": "B", "family": "language", "state": "downloaded",
+         "sizeGB": 1.0, "tools": False, "images": False, "reasoning": "none", "memory": None},
+    ]
+    daemon.sort_like_the_daemon()
+
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        table = app.query_one("#language-table", DataTable)
+        assert await _settled(pilot, lambda: table.row_count == 2)
+        await _settled(pilot, lambda: daemon.bus.subscriber_count == 1)
+        before = len(daemon.calls)
+
+        daemon.bus.publish("download.progress", model="pulling", status="downloading",
+                           completed=5, total=10, fraction=0.5, done=False, error=None,
+                           state="downloading 50%")
+
+        assert await _settled(
+            pilot,
+            lambda: any("50%" in str(table.get_cell_at((r, 3))) for r in range(2)),
+        )
+        assert not any(c.get("command") == "models.list" for c in daemon.calls[before:])
