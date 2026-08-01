@@ -77,7 +77,7 @@ window, over SSH). Quitting an attached dashboard leaves the daemon serving — 
 
 | Pane | What it does |
 |---|---|
-| **Devices** | Paired devices with live connection status, and anything awaiting approval |
+| **Devices** | Paired devices, each showing `● connected` / `○ offline` and updating as they come and go, plus anything awaiting approval |
 | **Text** / **Vision** / **TTS** / **STT** | One pane per model family, each listing real model names with capabilities, lifecycle state, live download progress and memory held. `d`/`s`/`x`/`delete` are the same four verbs as the CLI |
 | **Settings** | Port, keep-awake and log level, persisted to `config.json` |
 | **Log** | The daemon's log, including when attached over the control socket |
@@ -232,8 +232,11 @@ Any number of models can run at once; starting one never stops another. Nothing 
 automatically, so a Mac running several large models holds them all in memory until told
 otherwise — see [Model lifecycle](#model-lifecycle).
 
-Generation is serialized process-wide by a lock. MLX is not safe to run concurrently, so two
-devices issuing overlapping requests queue rather than corrupting each other's output.
+Every MLX call — language, vision and speech alike — runs on one dedicated thread. MLX registers
+its streams per-thread, so a model loaded on one thread and generated from another raises
+`RuntimeError: There is no Stream(gpu, 1) in current thread`. That single thread also serializes
+generation, which MLX needs anyway: two devices issuing overlapping requests queue rather than
+corrupting each other's output.
 
 ## Speech
 

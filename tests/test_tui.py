@@ -674,3 +674,63 @@ async def test_the_tab_underline_does_not_animate(daemon):
     async with app.run_test() as pilot:
         await _settled(pilot, lambda: "status" in daemon.commands())
         assert app.animation_level == "none"
+
+
+# MARK: - Connection status
+#
+# The pane marked connected devices with an asterisk in an unlabelled column,
+# against a space for offline ones — which is the main thing the pane is for and
+# was almost invisible.
+
+
+async def test_connected_and_offline_devices_are_distinguishable(daemon):
+    from textual.widgets import DataTable
+
+    daemon.devices = [
+        {"deviceId": "here", "name": "iPhone", "appName": "App",
+         "connected": True, "requiredModels": []},
+        {"deviceId": "gone", "name": "iPad", "appName": "App",
+         "connected": False, "requiredModels": []},
+    ]
+
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        table = app.query_one("#devices-table", DataTable)
+        assert await _settled(pilot, lambda: table.row_count == 2)
+
+        rows = {str(table.get_cell_at((r, 1))): str(table.get_cell_at((r, 4)))
+                for r in range(table.row_count)}
+        assert rows == {"iPhone": "connected", "iPad": "offline"}
+
+
+async def test_a_pending_request_is_marked_distinctly_from_both(daemon):
+    from textual.widgets import DataTable
+
+    daemon.pending = [{"deviceId": "waiting", "deviceName": "iPad", "appName": "App",
+                       "requiredModels": [], "waitingSeconds": 3}]
+
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        table = app.query_one("#devices-table", DataTable)
+        assert await _settled(pilot, lambda: table.row_count >= 2)
+        statuses = [str(table.get_cell_at((r, 4))) for r in range(table.row_count)]
+        assert "awaiting approval" in statuses
+
+
+async def test_the_status_follows_a_device_disconnecting(daemon):
+    """A device dropping has to show up without the user pressing refresh."""
+    from textual.widgets import DataTable
+
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        table = app.query_one("#devices-table", DataTable)
+        await _settled(pilot, lambda: table.row_count >= 1)
+        assert await _settled(
+            pilot, lambda: str(table.get_cell_at((0, 4))) == "connected"
+        )
+
+        daemon.devices[0]["connected"] = False
+        daemon.bus.publish("peer.disconnected", deviceId="device-abc123",
+                           name="iPhone", connected=[])
+
+        assert await _settled(pilot, lambda: str(table.get_cell_at((0, 4))) == "offline")

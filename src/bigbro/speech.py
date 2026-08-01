@@ -22,7 +22,7 @@ from typing import AsyncIterator
 
 import numpy as np
 
-from .inference import catalog
+from .inference import catalog, mlx_thread
 from .inference.downloader import ModelDownloader
 
 log = logging.getLogger("bigbro.speech")
@@ -219,7 +219,7 @@ class SpeechEngine:
         try:
             await self.download(kind)
             log.info("loading %s", kind.display_name)
-            loaded = await asyncio.to_thread(self._load_blocking, kind)
+            loaded = await mlx_thread.run(self._load_blocking, kind)
         except Exception as exc:
             self._errors[kind] = str(exc)
             log.error("failed to load %s: %s", kind.display_name, exc)
@@ -244,11 +244,7 @@ class SpeechEngine:
             return
         self._errors.pop(kind, None)
         log.info("stopped %s", kind.display_name)
-        try:
-            import mlx.core as mx
-            mx.clear_cache()
-        except Exception:  # pragma: no cover - depends on the MLX version
-            pass
+        mlx_thread.fire_and_forget(mlx_thread.clear_cache)
 
     def remove(self, kind: ModelKind) -> None:
         self.stop(kind)
@@ -264,7 +260,7 @@ class SpeechEngine:
         chosen_voice = voice or DEFAULT_VOICE
 
         async with self._lock:
-            audio = await asyncio.to_thread(
+            audio = await mlx_thread.run(
                 self._synthesize_blocking, model, text, chosen_voice, speed or 1.0
             )
 
@@ -291,7 +287,7 @@ class SpeechEngine:
             raise SpeechError("Audio contained no samples.")
 
         async with self._lock:
-            result = await asyncio.to_thread(model.generate, samples)
+            result = await mlx_thread.run(model.generate, samples)
 
         text = getattr(result, "text", None)
         if text is None:

@@ -15,11 +15,11 @@ import binascii
 import io
 import logging
 import queue
-import threading
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, AsyncIterator
 
+from . import mlx_thread
 from .catalog import BigBroModel, Family, ReasoningStyle, resolve
 from .downloader import ModelDownloader
 from .parsers import Delta, ParsedEvent, Reasoning, ToolCall
@@ -30,18 +30,8 @@ log = logging.getLogger("bigbro.engine")
 _DONE = object()
 
 
-def _mlx_active_memory() -> int:
-    """Bytes MLX currently has allocated, or 0 if it isn't loaded yet."""
-    import sys
-
-    module = sys.modules.get("mlx.core")
-    reader = getattr(module, "get_active_memory", None) if module else None
-    if reader is None:
-        return 0
-    try:
-        return int(reader())
-    except Exception:  # pragma: no cover - depends on the MLX build
-        return 0
+#: Kept as an alias: the reader lives with the thread that owns MLX now.
+_mlx_active_memory = mlx_thread.active_memory
 
 
 class InferenceError(Exception):
@@ -185,9 +175,7 @@ class MLXEngine:
             # weights, and a 12 GB model is not a figure to report wrongly. It also
             # keeps two large materializations from peaking against each other.
             async with self._load_lock:
-                before = _mlx_active_memory()
-                loaded = await asyncio.to_thread(self._load_blocking, model)
-                grew = _mlx_active_memory() - before
+                loaded, grew = await mlx_thread.run(self._load_measured, model)
                 if grew > 0:
                     self._memory[model.id] = grew
         except Exception as exc:
@@ -214,6 +202,13 @@ class MLXEngine:
         """
         return {model_id: size for model_id, size in self._memory.items() if model_id in self._loaded}
 
+    @classmethod
+    def _load_measured(cls, model: BigBroModel):
+        """Loads on the MLX thread, reporting what the weights added."""
+        before = mlx_thread.active_memory()
+        loaded = cls._load_blocking(model)
+        return loaded, mlx_thread.active_memory() - before
+
     @staticmethod
     def _load_blocking(model: BigBroModel):
         if model.family is Family.VISION:
@@ -233,13 +228,11 @@ class MLXEngine:
         self._errors.pop(model_id, None)
         self._memory.pop(model_id, None)
         log.info("stopped %s", model_id)
-        # Reclaim what the model was holding. MLX caches buffers between requests, and
-        # those survive the model object going away unless the cache is cleared.
-        try:
-            import mlx.core as mx
-            mx.clear_cache()
-        except Exception:  # pragma: no cover - depends on the MLX version
-            pass
+        # Reclaim what the model was holding. MLX caches buffers between requests,
+        # and those survive the model object going away unless the cache is
+        # cleared — which, like everything else here, has to happen on the MLX
+        # thread. Nothing waits on it.
+        mlx_thread.fire_and_forget(mlx_thread.clear_cache)
 
     def remove(self, model: BigBroModel) -> None:
         """Deletes a model's downloaded weights. Stops it first if it is running."""
@@ -336,19 +329,17 @@ class MLXEngine:
             bridge: queue.Queue = queue.Queue(maxsize=256)
             loop = asyncio.get_running_loop()
 
-            def produce() -> None:
-                try:
-                    for text in _generate_blocking(
-                        loaded, model, messages, effective_tools, options, context
-                    ):
-                        bridge.put(text)
-                except Exception as exc:  # surfaced on the consuming side
-                    bridge.put(exc)
-                finally:
-                    bridge.put(_DONE)
-
-            thread = threading.Thread(target=produce, name=f"generate-{model.id}", daemon=True)
-            thread.start()
+            # On the MLX thread, not a thread of its own: a model loaded there and
+            # generated from anywhere else raises "There is no Stream(gpu, 1) in
+            # current thread", which is what every request used to do.
+            pending = mlx_thread.submit(
+                mlx_thread.drain_to_queue,
+                lambda: _generate_blocking(
+                    loaded, model, messages, effective_tools, options, context
+                ),
+                bridge,
+                _DONE,
+            )
 
             try:
                 while True:
@@ -362,7 +353,9 @@ class MLXEngine:
                 for event in parser.finish():
                     yield event
             finally:
-                thread.join(timeout=5)
+                # The worker is shared, so a half-finished generation would leave
+                # the next request reading someone else's tokens.
+                await asyncio.wrap_future(pending)
 
 
 def template_context(

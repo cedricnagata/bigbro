@@ -21,6 +21,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
+from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import (
     Button,
@@ -296,7 +297,7 @@ class BigBroApp(App):
 
     async def on_mount(self) -> None:
         devices = self._dash.query_one("#devices-table", DataTable)
-        devices.add_columns("", "device", "app", "id", "models")
+        devices.add_columns("", "device", "app", "id", "status", "models")
 
         # Keys are kept because live updates address the state column by name.
         # Indexing off the end silently retargets the moment a column is added —
@@ -526,20 +527,27 @@ class BigBroApp(App):
 
         for request in pending:
             table.add_row(
-                "?",
+                Text("?", style="bold yellow"),
                 request.get("deviceName", "?"),
                 request.get("appName", ""),
                 str(request.get("deviceId", ""))[:8],
-                "awaiting approval",
+                Text("awaiting approval", style="bold yellow"),
+                ", ".join(request.get("requiredModels", [])) or "-",
                 key=f"pending:{request.get('deviceId')}",
             )
 
         for device in self._devices:
+            # Spelled out and coloured, not a bare marker in a blank column: which
+            # devices are actually reachable is the main thing this pane is for,
+            # and an asterisk against a space does not carry that at a glance.
+            connected = bool(device.get("connected"))
             table.add_row(
-                "*" if device.get("connected") else " ",
+                Text("●" if connected else "○", style="green" if connected else "dim"),
                 device.get("name", "?"),
                 device.get("appName", ""),
                 str(device.get("deviceId", ""))[:8],
+                Text("connected", style="green") if connected
+                else Text("offline", style="dim"),
                 ", ".join(device.get("requiredModels", [])) or "-",
                 key=f"device:{device.get('deviceId')}",
             )
