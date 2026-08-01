@@ -512,3 +512,32 @@ async def test_two_devices_are_addressed_independently(harness):
     assert message["delta"] == "for-a"
     await first.close()
     await second.close()
+
+
+# MARK: - Nothing to speak
+#
+# Kokoro yields no segments for whitespace-only input, and the engine reported
+# that as "Kokoro produced no audio for that input" — the symptom, not the cause.
+# A client whose answer was all reasoning, or ended up as a couple of newlines,
+# got a message about the speech model.
+
+
+@pytest.mark.parametrize("text", ["", "   ", "\n\n", "\t \n"])
+async def test_speaking_nothing_says_so(harness, text):
+    client = await approved_client(harness)
+    await client.send({"type": "speechRequest", "requestId": "sx", "input": text})
+
+    error = await client.next()
+    assert error["type"] == "error"
+    assert error["message"] == "There was no text to speak."
+    await client.close()
+
+
+async def test_text_with_something_in_it_is_still_spoken(harness):
+    """The guard must not swallow input that only looks unpromising."""
+    client = await approved_client(harness)
+    await client.send({"type": "speechRequest", "requestId": "sy", "input": "  ...  "})
+
+    received = await client.collect_until("done")
+    assert [m["type"] for m in received] == ["audioStart", "audioChunk", "audioChunk", "done"]
+    await client.close()

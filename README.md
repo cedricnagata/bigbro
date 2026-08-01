@@ -252,8 +252,13 @@ Voice selection (which Kokoro speaker to use) is a BigBroKit parameter, not a Ma
 Synthesized audio is always 24 kHz 16-bit mono PCM — the only format Kokoro produces, and what
 BigBroKit's `BigBroAudioPlayer` expects.
 
-Uploaded audio is resampled to whatever rate the transcription model expects, using the rate
-declared in the WAV header. Parakeet is handed raw samples and applies its own configured rate to
+Uploaded audio can be `wav`, headerless `pcm`, or any container CoreAudio reads — `m4a` above all,
+since that is what `AVAudioRecorder` produces by default and therefore what an iOS app records
+without being told otherwise. Anything compressed is decoded with `afconvert`, which ships with
+macOS, rather than by adding a decoding dependency.
+
+Audio is then resampled to whatever rate the transcription model expects, using the rate declared
+in the WAV header. Parakeet is handed raw samples and applies its own configured rate to
 them, so a 24 kHz utterance passed through untouched transcribes as though it were 16 kHz — faster
 and higher, which comes back as plausible wrong words rather than an error. Headerless PCM is
 assumed to be 24 kHz, the rate BigBroKit records at.
@@ -288,7 +293,7 @@ rebuild.
 | `request` | `requestId`, `messages`, `streaming`, `model`, `tools?`, `options?`, `think?`, `reasoning_effort?` | Chat request |
 | `generateRequest` | `requestId`, `prompt`, `streaming`, `model`, `images?`, `system?`, `options?`, `think?`, `reasoning_effort?` | Single-turn generate |
 | `speechRequest` | `requestId`, `input`, `voice?`, `speed?` | Text-to-speech |
-| `transcribeRequest` | `requestId`, `audio` (base64), `audioFormat?` | Speech-to-text. Max 10 MB decoded |
+| `transcribeRequest` | `requestId`, `audio` (base64), `audioFormat?` | Speech-to-text. `wav`, `pcm`, or any container CoreAudio reads — `m4a`, `mp3`, `aac`, `caf`, `aiff`, `flac`, `alac`. Max 10 MB decoded |
 | `run` | `requestId`, `model` (a catalog id, or `"tts"` / `"stt"` / `"speech"`) | Starts a model — puts its weights in memory — without generating anything |
 | `stop` | `requestId`, `model` (a catalog id) | Unloads a model from memory, keeping the download |
 | `ping` | — | Keepalive; answered with `pong` |

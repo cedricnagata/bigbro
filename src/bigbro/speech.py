@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import pathlib
 import struct
 from enum import Enum
 from typing import AsyncIterator
@@ -167,7 +168,52 @@ def float_samples(audio: bytes, audio_format: str) -> tuple[np.ndarray, int]:
             offset = body + chunk_size + (chunk_size % 2)
         raise SpeechError("WAV file contained no data chunk.")
 
-    raise SpeechError(f"Unsupported audio format '{audio_format}'. Send wav or pcm.")
+    # Anything else goes through CoreAudio. iOS records to m4a by default —
+    # `AVAudioRecorder` with `kAudioFormatMPEG4AAC` — so refusing it would push a
+    # transcode onto every client for the most ordinary way to capture audio on
+    # the platform bigbro exists to serve.
+    return _decode_via_coreaudio(audio, fmt)
+
+
+#: Formats handed to `afconvert`. Not an exhaustive list of what CoreAudio reads;
+#: it is what a client is plausibly going to send.
+COMPRESSED_FORMATS = ("m4a", "mp4", "aac", "caf", "aiff", "aif", "mp3", "flac", "alac")
+
+
+def _decode_via_coreaudio(audio: bytes, fmt: str) -> tuple[np.ndarray, int]:
+    """Decodes with `afconvert`, which ships with macOS.
+
+    Shelling out rather than adding a decoding dependency, the same reasoning as
+    `scutil` for the computer name: the platform already has this, and it
+    understands every container CoreAudio does.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    if fmt not in COMPRESSED_FORMATS:
+        raise SpeechError(
+            f"Unsupported audio format '{fmt}'. Send wav, pcm, or one of: "
+            f"{', '.join(COMPRESSED_FORMATS)}."
+        )
+    if shutil.which("afconvert") is None:  # pragma: no cover - always present on macOS
+        raise SpeechError(f"Cannot decode '{fmt}' — afconvert is not available.")
+
+    with tempfile.TemporaryDirectory(prefix="bigbro-audio-") as workspace:
+        source = pathlib.Path(workspace) / f"input.{fmt}"
+        target = pathlib.Path(workspace) / "output.wav"
+        source.write_bytes(audio)
+        result = subprocess.run(
+            ["afconvert", "-f", "WAVE", "-d", "LEI16", str(source), str(target)],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        if result.returncode != 0 or not target.exists():
+            detail = (result.stderr or result.stdout or "").strip().splitlines()
+            raise SpeechError(
+                f"Could not decode '{fmt}' audio"
+                + (f": {detail[-1]}" if detail else ".")
+            )
+        return float_samples(target.read_bytes(), "wav")
 
 
 class SpeechEngine:
@@ -299,7 +345,11 @@ class SpeechEngine:
             audio = getattr(result, "audio", result)
             segments.append(np.asarray(audio, dtype=np.float32).reshape(-1))
         if not segments:
-            raise SpeechError("Kokoro produced no audio for that input.")
+            # Reached only for input the router's own check let through — text that
+            # is non-empty but has nothing speakable in it.
+            raise SpeechError(
+                f"{ModelKind.TTS.model_name} had nothing to say for that input."
+            )
         return np.concatenate(segments)
 
     # MARK: - Transcription

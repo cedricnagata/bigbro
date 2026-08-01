@@ -539,6 +539,14 @@ class AppRouter:
             log.warning("speechRequest missing requestId or input")
             return
 
+        # Rejected here, with the reason, rather than deep in the engine. Kokoro
+        # yields no segments for whitespace-only input, and "Kokoro produced no
+        # audio for that input" describes the symptom while hiding the cause: an
+        # answer that was all reasoning, or all newlines, was sent to be spoken.
+        if not text.strip():
+            await self._fail(request_id, "There was no text to speak.", device_id)
+            return
+
         voice = message.get("voice")
         voice = voice if isinstance(voice, str) and voice else None
         speed = message.get("speed")
