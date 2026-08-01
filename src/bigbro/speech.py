@@ -110,8 +110,25 @@ def pcm16(samples: np.ndarray) -> bytes:
     return (clipped * 32767.0).astype("<i2").tobytes()
 
 
-def float_samples(audio: bytes, audio_format: str) -> np.ndarray:
-    """Decodes an uploaded utterance to mono float32 at whatever rate it arrived in.
+def resample(samples: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
+    """Linear resample to `target_rate`.
+
+    Parakeet is handed raw samples and applies its own configured rate to them, so
+    a 24 kHz utterance passed through untouched is transcribed as though it were
+    16 kHz — faster and higher, which comes back as plausible-looking wrong words
+    rather than an error.
+    """
+    if source_rate == target_rate or samples.size == 0:
+        return samples
+    duration = samples.size / source_rate
+    target_length = max(1, int(round(duration * target_rate)))
+    source_x = np.arange(samples.size, dtype=np.float64)
+    target_x = np.linspace(0, samples.size - 1, target_length, dtype=np.float64)
+    return np.interp(target_x, source_x, samples).astype(np.float32)
+
+
+def float_samples(audio: bytes, audio_format: str) -> tuple[np.ndarray, int]:
+    """Decodes an uploaded utterance to (mono float32, sample rate).
 
     Handles the headerless-PCM and WAV cases directly; anything else is refused rather
     than guessed at, since misreading a container yields noise that transcribes to
@@ -120,7 +137,9 @@ def float_samples(audio: bytes, audio_format: str) -> np.ndarray:
     fmt = (audio_format or "wav").lower()
 
     if fmt == "pcm":
-        return np.frombuffer(audio, dtype="<i2").astype(np.float32) / 32768.0
+        # Headerless PCM says nothing about itself; BigBroKit records at the rate
+        # it synthesizes at, so that is the only defensible assumption.
+        return np.frombuffer(audio, dtype="<i2").astype(np.float32) / 32768.0, SAMPLE_RATE
 
     if fmt == "wav":
         if len(audio) < _WAV_HEADER_BYTES or audio[:4] != b"RIFF":
@@ -128,13 +147,14 @@ def float_samples(audio: bytes, audio_format: str) -> np.ndarray:
         # Walk the chunk list rather than assuming a 44-byte header — WAV files from
         # iOS often carry a LIST/INFO chunk ahead of the data.
         offset = 12
-        channels, bits = 1, 16
+        channels, bits, rate = 1, 16, SAMPLE_RATE
         while offset + 8 <= len(audio):
             chunk_id = audio[offset:offset + 4]
             chunk_size = struct.unpack_from("<I", audio, offset + 4)[0]
             body = offset + 8
             if chunk_id == b"fmt ":
                 channels = struct.unpack_from("<H", audio, body + 2)[0]
+                rate = struct.unpack_from("<I", audio, body + 4)[0] or SAMPLE_RATE
                 bits = struct.unpack_from("<H", audio, body + 14)[0]
             elif chunk_id == b"data":
                 payload = audio[body:body + chunk_size]
@@ -143,7 +163,7 @@ def float_samples(audio: bytes, audio_format: str) -> np.ndarray:
                 samples = np.frombuffer(payload, dtype="<i2").astype(np.float32) / 32768.0
                 if channels > 1:
                     samples = samples.reshape(-1, channels).mean(axis=1)
-                return samples
+                return samples, rate
             offset = body + chunk_size + (chunk_size % 2)
         raise SpeechError("WAV file contained no data chunk.")
 
@@ -220,10 +240,14 @@ class SpeechEngine:
             await self.download(kind)
             log.info("loading %s", kind.display_name)
             loaded = await mlx_thread.run(self._load_blocking, kind)
-        except Exception as exc:
-            self._errors[kind] = str(exc)
-            log.error("failed to load %s: %s", kind.display_name, exc)
-            raise SpeechError(f"Could not load {kind.display_name}: {exc}") from exc
+        except (Exception, SystemExit) as exc:
+            # SystemExit included deliberately: mlx-audio's phonemizer calls
+            # `sys.exit` when it cannot fetch its spaCy model, and letting that
+            # through unwinds the daemon rather than failing one request.
+            message = str(exc) or type(exc).__name__
+            self._errors[kind] = message
+            log.error("failed to load %s: %s", kind.display_name, message)
+            raise SpeechError(f"Could not load {kind.display_name}: {message}") from exc
 
         self._loaded[kind] = loaded
         self._errors.pop(kind, None)
@@ -282,15 +306,35 @@ class SpeechEngine:
 
     async def transcribe(self, audio: bytes, audio_format: str = "wav") -> tuple[str, str | None]:
         model = await self.run(ModelKind.STT)
-        samples = float_samples(audio, audio_format)
+        samples, rate = float_samples(audio, audio_format)
         if samples.size == 0:
             raise SpeechError("Audio contained no samples.")
 
+        target = self._transcribe_rate(model)
+        samples = resample(samples, rate, target)
+
         async with self._lock:
-            result = await mlx_thread.run(model.generate, samples)
+            result = await mlx_thread.run(self._transcribe_blocking, model, samples)
 
         text = getattr(result, "text", None)
         if text is None:
             text = str(result)
         language = getattr(result, "language", None)
         return text.strip(), language
+
+    @staticmethod
+    def _transcribe_rate(model) -> int:
+        """The rate the model expects raw samples to be in."""
+        config = getattr(model, "preprocessor_config", None)
+        return int(getattr(config, "sample_rate", 16_000) or 16_000)
+
+    @staticmethod
+    def _transcribe_blocking(model, samples: np.ndarray):
+        """Parakeet takes an `mx.array`, not a numpy one.
+
+        Handed numpy it tries to cast with `dtype=mx.bfloat16` and fails with
+        "Cannot interpret 'mlx.core.bfloat16' as a data type".
+        """
+        import mlx.core as mx
+
+        return model.generate(mx.array(samples))

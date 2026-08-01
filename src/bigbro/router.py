@@ -33,6 +33,15 @@ MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 #: prompt.
 VALID_REASONING_EFFORTS = frozenset({"low", "medium", "high"})
 
+#: What a request handler treats as a failed request rather than a reason to stop.
+#:
+#: `BaseException` minus the two that genuinely mean "stop": a library is allowed
+#: to be badly behaved without taking the server with it. misaki really does call
+#: `sys.exit(2)` when it cannot fetch its spaCy model, and SystemExit is not an
+#: Exception — so one client asking for speech killed the daemon for every other
+#: device connected to it.
+REQUEST_FAILURES = (Exception, SystemExit)
+
 
 def explicit_reasoning_effort(message: dict[str, Any]) -> str | None:
     """The effort the client actually named, if it named a valid one.
@@ -300,7 +309,7 @@ class AppRouter:
                         {"type": "toolCall", "requestId": request_id, "calls": [event.to_wire()]},
                         to=device_id,
                     )
-        except (InferenceError, Exception) as exc:
+        except REQUEST_FAILURES as exc:
             log.error("%s error for %s: %s", label, request_id[:8], exc)
             await self.server.send(
                 {"type": "error", "requestId": request_id, "message": str(exc)}, to=device_id
@@ -564,7 +573,7 @@ class AppRouter:
                     "seq": seq,
                 }, to=device_id)
                 seq += 1
-        except (SpeechError, Exception) as exc:
+        except REQUEST_FAILURES as exc:
             log.error("speech error for %s: %s", request_id[:8], exc)
             await self.server.send(
                 {"type": "error", "requestId": request_id, "message": str(exc)}, to=device_id
@@ -597,7 +606,7 @@ class AppRouter:
 
         try:
             text, language = await self.speech.transcribe(audio, audio_format)
-        except (SpeechError, Exception) as exc:
+        except REQUEST_FAILURES as exc:
             log.error("transcribe error for %s: %s", request_id[:8], exc)
             await self.server.send(
                 {"type": "error", "requestId": request_id, "message": str(exc)}, to=device_id

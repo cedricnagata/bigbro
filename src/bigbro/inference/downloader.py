@@ -282,6 +282,15 @@ class ModelDownloader:
         if existing is not None:
             return await existing
 
+        # Already on disk: nothing to fetch, and nothing to announce. Going
+        # through the full flow anyway cost a network round trip to size the repo
+        # on every single model start — which broadcast a spurious "downloading"
+        # to every connected device, and hung outright when the Hub was slow or
+        # unreachable, for a model that was sitting on disk the whole time.
+        recorded = self.record.path(model.id)
+        if recorded is not None and recorded.exists():
+            return recorded
+
         task = asyncio.create_task(self._run(model))
         self._tasks[model.id] = task
         try:

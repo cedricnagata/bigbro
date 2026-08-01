@@ -410,3 +410,40 @@ def test_kokoros_pytorch_duplicate_is_not_fetched():
 
     kokoro = next(m for m in SPEECH_MODELS if m.id == "kokoro")
     assert not any(fnmatch("kokoro-v1_0.pth", p) for p in patterns_for(kokoro))
+
+
+async def test_a_downloaded_model_is_not_re_fetched_on_start(downloader, monkeypatch, tmp_path):
+    """Starting a downloaded model used to re-run the whole flow.
+
+    That meant a network round trip to size the repo every time, a spurious
+    "downloading" broadcast to every connected device, and a hang when the Hub was
+    slow or unreachable — for a model already on disk.
+    """
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    downloader.record.record("llama-3.2-1b", weights)
+
+    calls = []
+    monkeypatch.setattr(
+        "bigbro.inference.downloader.repo_total_bytes",
+        lambda *a: calls.append("sized") or 1,
+    )
+    import huggingface_hub
+    monkeypatch.setattr(
+        huggingface_hub, "snapshot_download",
+        lambda **k: calls.append("fetched"), raising=False,
+    )
+
+    seen = []
+    downloader.on_progress = lambda mid, p: seen.append(p)
+
+    assert await downloader.download(catalog_model("llama-3.2-1b")) == weights
+    assert calls == [], "it went to the network for a model already on disk"
+    assert seen == [], "it announced a download that never happened"
+
+
+async def test_a_recorded_path_that_vanished_is_re_fetched(downloader, monkeypatch, tmp_path):
+    """The short-circuit must check the disk, not just the record."""
+    downloader.record.record("llama-3.2-1b", tmp_path / "gone")
+    seen = await _download(downloader, monkeypatch, FakeHub())
+    assert seen, "a vanished download should be fetched again"

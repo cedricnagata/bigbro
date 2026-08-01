@@ -78,8 +78,9 @@ def _wav(samples: np.ndarray, channels: int = 1, rate: int = 16000) -> bytes:
 
 def test_wav_decoding():
     original = np.array([0.0, 0.25, -0.25], dtype=np.float32)
-    decoded = float_samples(_wav(original), "wav")
+    decoded, rate = float_samples(_wav(original), "wav")
     assert np.allclose(decoded, original, atol=1e-3)
+    assert rate == 16000
 
 
 def test_wav_with_an_extra_chunk_before_data():
@@ -89,21 +90,22 @@ def test_wav_with_an_extra_chunk_before_data():
     extra = b"LIST" + struct.pack("<I", 4) + b"INFO"
     payload = head + extra + tail
     payload = b"RIFF" + struct.pack("<I", len(payload) - 8) + payload[8:]
-    decoded = float_samples(payload, "wav")
+    decoded, _rate = float_samples(payload, "wav")
     assert np.allclose(decoded, [0.5, -0.5], atol=1e-3)
 
 
 def test_stereo_wav_is_downmixed_to_mono():
     interleaved = np.array([1.0, 0.0, 1.0, 0.0], dtype=np.float32)  # L,R,L,R
-    decoded = float_samples(_wav(interleaved, channels=2), "wav")
+    decoded, _rate = float_samples(_wav(interleaved, channels=2), "wav")
     assert len(decoded) == 2
     assert np.allclose(decoded, [0.5, 0.5], atol=1e-3)
 
 
 def test_headerless_pcm_decoding():
     raw = np.array([1000, -1000], dtype="<i2").tobytes()
-    decoded = float_samples(raw, "pcm")
+    decoded, rate = float_samples(raw, "pcm")
     assert np.allclose(decoded, [1000 / 32768, -1000 / 32768], atol=1e-5)
+    assert rate == 24000  # headerless PCM says nothing; assume what we synthesize at
 
 
 @pytest.mark.parametrize("payload,fmt", [
@@ -299,3 +301,55 @@ async def test_oversized_socket_path_explains_itself(tmp_path):
     deep = tmp_path / ("d" * 60) / ("e" * 60) / "control.sock"
     with pytest.raises(OSError, match="BIGBRO_HOME"):
         await ControlServer(lambda _r: None, deep).start()
+
+
+# MARK: - Resampling
+#
+# Parakeet is handed raw samples and applies its own configured rate to them, so
+# a 24 kHz utterance passed through untouched transcribes as though it were
+# 16 kHz — faster and higher, which comes back as plausible wrong words rather
+# than an error.
+
+
+def test_the_wav_sample_rate_is_read_not_assumed():
+    samples = np.array([0.0, 0.5, -0.5, 0.25], dtype=np.float32)
+    for rate in (8000, 16000, 22050, 44100, 48000):
+        _decoded, parsed = float_samples(_wav(samples, rate=rate), "wav")
+        assert parsed == rate
+
+
+@pytest.mark.parametrize("source,target,count,expected", [
+    (24000, 16000, 2400, 1600),
+    (16000, 16000, 1000, 1000),
+    (48000, 16000, 4800, 1600),
+    (8000, 16000, 800, 1600),
+])
+def test_resample_lengths(source, target, count, expected):
+    from bigbro.speech import resample
+
+    out = resample(np.zeros(count, dtype=np.float32), source, target)
+    assert out.size == expected
+
+
+def test_resample_preserves_the_signal_shape():
+    from bigbro.speech import resample
+
+    # A ramp stays a ramp: endpoints hold and it stays monotonic.
+    ramp = np.linspace(0.0, 1.0, 2400, dtype=np.float32)
+    out = resample(ramp, 24000, 16000)
+    assert out[0] == pytest.approx(0.0, abs=1e-3)
+    assert out[-1] == pytest.approx(1.0, abs=1e-3)
+    assert np.all(np.diff(out) >= -1e-6)
+
+
+def test_resample_is_a_noop_at_the_same_rate():
+    from bigbro.speech import resample
+
+    samples = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+    assert resample(samples, 16000, 16000) is samples
+
+
+def test_resample_handles_empty_audio():
+    from bigbro.speech import resample
+
+    assert resample(np.array([], dtype=np.float32), 24000, 16000).size == 0

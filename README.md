@@ -252,6 +252,16 @@ Voice selection (which Kokoro speaker to use) is a BigBroKit parameter, not a Ma
 Synthesized audio is always 24 kHz 16-bit mono PCM — the only format Kokoro produces, and what
 BigBroKit's `BigBroAudioPlayer` expects.
 
+Uploaded audio is resampled to whatever rate the transcription model expects, using the rate
+declared in the WAV header. Parakeet is handed raw samples and applies its own configured rate to
+them, so a 24 kHz utterance passed through untouched transcribes as though it were 16 kHz — faster
+and higher, which comes back as plausible wrong words rather than an error. Headerless PCM is
+assumed to be 24 kHz, the rate BigBroKit records at.
+
+Kokoro phonemizes through `misaki`, which needs a spaCy model. Both are declared dependencies: left
+optional, `misaki` raises at synthesis time and — worse — calls `sys.exit` when it cannot fetch the
+model itself, which used to take the whole daemon down with it.
+
 ## Required models
 
 iOS apps built with BigBroKit can declare which models they require. On connect, BigBro:

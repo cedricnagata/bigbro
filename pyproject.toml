@@ -29,7 +29,23 @@ dependencies = [
     "mlx-lm>=0.28; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "mlx-vlm>=0.3; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "mlx-audio>=0.4.6; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    # Kokoro phonemizes through misaki. mlx-audio treats it as optional and raises
+    # at synthesis time without it — "Speak failed: Kokoro requires the optional
+    # misaki package" — which is a runtime failure for a feature bigbro ships, so
+    # it is a hard dependency here rather than something a user discovers.
+    "misaki[en]>=0.9; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    # misaki's English G2P needs a spaCy model, and if it is absent misaki calls
+    # `spacy.cli.download` at synthesis time — which shells out to pip and, when
+    # that fails, calls sys.exit(2). Declaring it up front means that path is
+    # never taken. spaCy models are not on PyPI, hence the direct URL.
+    "en-core-web-sm; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
+
+# spaCy models are not published to PyPI, so the wheel is named directly. Kept in
+# `tool.uv.sources` rather than inline in `project.dependencies`, which hatchling
+# rejects for direct URLs.
+[tool.uv.sources]
+en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.24"]
