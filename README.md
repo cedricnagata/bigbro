@@ -78,7 +78,7 @@ window, over SSH). Quitting an attached dashboard leaves the daemon serving — 
 | Pane | What it does |
 |---|---|
 | **Devices** | Paired devices with live connection status, and anything awaiting approval |
-| **Models** | The catalog with capabilities and lifecycle state, download progress moving in place. `d`/`s`/`x`/`delete` are the same four verbs as the CLI |
+| **Models** | The catalog with capabilities, lifecycle state, live download progress and per-model memory. `d`/`s`/`x`/`delete` are the same four verbs as the CLI |
 | **Settings** | Port, keep-awake and log level, persisted to `config.json` |
 | **Log** | The daemon's log, including when attached over the control socket |
 
@@ -127,6 +127,16 @@ weights aren't there, and a request for a model that isn't running starts it any
 just let you pay those costs when you choose to.
 
 `start`, `stop` and `delete` also accept `tts` and `stt` for the speech models.
+
+### Downloads
+
+Progress is pushed live — to the dashboard's Models pane and to every connected iOS device as
+`modelDownloadProgress`. The size is taken from the Hub's file metadata before the transfer starts,
+counting only the files that will actually be fetched, so the percentage means what it says.
+
+BigBro fetches the same `allow_patterns` `mlx-lm` and `mlx-vlm` use, rather than the whole repo. A
+model repository that also ships original PyTorch weights or a GGUF conversion would otherwise cost
+gigabytes nothing ever reads — and would inflate the total past anything the download could reach.
 
 ### Memory
 

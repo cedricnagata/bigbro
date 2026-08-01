@@ -247,6 +247,7 @@ class BigBroApp(App):
         self._devices: list[dict[str, Any]] = []
         self._settings: dict[str, Any] = {}
         self._prompting: set[str] = set()
+        self._state_column = None
 
     # MARK: - Layout
 
@@ -276,7 +277,11 @@ class BigBroApp(App):
         devices.add_columns("", "device", "app", "id", "models")
 
         models = self._dash.query_one("#models-table", DataTable)
-        models.add_columns("model", "size", "caps", "state", "memory")
+        # Keys are kept because live updates address the state column by name.
+        # Indexing off the end silently retargets the moment a column is added —
+        # which is how download progress ended up being written into "memory".
+        columns = models.add_columns("model", "size", "caps", "state", "memory")
+        self._state_column = columns[3]
 
         self.listen_for_events()
         await self.action_refresh()
@@ -564,10 +569,10 @@ class BigBroApp(App):
                 break
 
         table = self._find("#models-table", DataTable)
-        if table is None:
+        if table is None or self._state_column is None:
             return
         try:
-            table.update_cell(f"model:{model_id}", table.columns[-1].key, state or "?")
+            table.update_cell(f"model:{model_id}", self._state_column, state or "?")
         except Exception:
             # Row not present yet (a speech model, or a race with a rebuild).
             pass

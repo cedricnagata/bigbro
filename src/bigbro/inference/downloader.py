@@ -12,11 +12,12 @@ import asyncio
 import logging
 import shutil
 import time
+from fnmatch import fnmatch
 from dataclasses import dataclass
 from pathlib import Path
 
 from ..config import JSONStore, support_dir
-from .catalog import BigBroModel
+from .catalog import BigBroModel, Family
 
 log = logging.getLogger("bigbro.download")
 
@@ -96,34 +97,123 @@ def hub_repository_root(directory: Path) -> Path | None:
     return repository
 
 
-def _snapshot(repo: str, on_bytes) -> Path:
-    """Blocking Hub download. Runs in a worker thread — never on the event loop."""
+class _DevNull:
+    """Where the Hub's progress bars are pointed.
+
+    stdout belongs to the dashboard, and under `--no-ui` a redrawing bar would
+    interleave with the log stream. `isatty()` is False so tqdm picks its
+    non-interactive path and does not emit control sequences either.
+    """
+
+    def write(self, *_args) -> int:
+        return 0
+
+    def flush(self) -> None: ...
+
+    def isatty(self) -> bool:
+        return False
+
+
+# What each loader actually fetches. Copied from `mlx_lm.utils.get_model_path` and
+# `mlx_vlm.utils.get_model_path` so bigbro downloads the same files MLX will look
+# for — no more, so a repo that also ships original PyTorch weights or a GGUF
+# conversion does not cost gigabytes nothing will ever read.
+#
+# They must also be applied when sizing the repo. A total that counts files the
+# download skips is a progress bar that can never reach 100%.
+LANGUAGE_PATTERNS = (
+    "*.json", "model*.safetensors", "*.py", "tokenizer.model",
+    "*.tiktoken", "tiktoken.model", "*.txt", "*.jsonl", "*.jinja",
+)
+VISION_PATTERNS = (
+    "*.json", "*.safetensors", "*.py", "*.model", "*.tiktoken", "*.txt", "*.jinja",
+)
+
+
+def patterns_for(model: BigBroModel) -> list[str]:
+    """The `allow_patterns` the loader for this model's family would use."""
+    return list(VISION_PATTERNS if model.family is Family.VISION else LANGUAGE_PATTERNS)
+
+
+def repo_total_bytes(repo: str, patterns: list[str] | None = None) -> int:
+    """The download's size, from the Hub's own file metadata.
+
+    Asked for up front rather than inferred from the progress bars, because
+    `snapshot_download` instantiates `tqdm_class` for three different things: two
+    byte counters and one bar that counts *files*. Adding their totals together
+    mixes units and yields a "total" of 8 — which reads as 100% complete from the
+    first byte. The API knows the real answer, so ask it.
+
+    Counts only the files `patterns` would fetch, so the total and the progress
+    against it describe the same download.
+    """
+    try:
+        from huggingface_hub import HfApi
+
+        info = HfApi().model_info(repo, files_metadata=True)
+        siblings = info.siblings or []
+        if patterns:
+            siblings = [
+                s for s in siblings
+                if any(fnmatch(getattr(s, "rfilename", ""), p) for p in patterns)
+            ]
+        return sum(int(getattr(s, "size", 0) or 0) for s in siblings)
+    except Exception as exc:  # network, auth, renamed repo
+        log.warning("could not size %s up front: %s", repo, exc)
+        return 0
+
+
+def _snapshot(repo: str, patterns: list[str], on_progress) -> Path:
+    """Blocking Hub download. Runs in a worker thread — never on the event loop.
+
+    `on_progress(furthest_bytes)` is called as the Hub reports. It receives an
+    absolute figure rather than a delta — see `_ProgressTqdm` for why summing is
+    wrong here.
+    """
     from huggingface_hub import snapshot_download
+    from huggingface_hub.utils.tqdm import tqdm as hf_tqdm
 
-    class _ProgressTqdm:
-        """Stands in for tqdm so huggingface_hub reports bytes without drawing bars.
+    #: Bar identity → bytes that bar has counted.
+    counters: dict[int, int] = {}
 
-        The Hub instantiates one of these per file and calls `update(n)` as bytes
-        land; summing across instances is what gives a whole-model figure.
+    class _ProgressTqdm(hf_tqdm):
+        """Reports Hub progress without drawing anything.
+
+        Subclasses the Hub's own tqdm rather than duck-typing one. The Hub calls a
+        wide slice of the tqdm API on whatever it is given — `set_postfix_str`,
+        `format_dict`, `reset` — and a hand-rolled stand-in raises AttributeError
+        from inside its worker threads the moment it touches one that was missed.
+
+        `snapshot_download` creates three of these: two byte counters and one that
+        counts *files*. Only the byte ones are watched, and the furthest along is
+        taken rather than their sum — both report the same transfer from different
+        ends (network vs. reconstruction), so adding them double-counts, while the
+        one that finishes is the one that reaches the real total.
         """
 
-        def __init__(self, *args, total=None, **kwargs):
-            self.total = total or 0
-            self.n = 0
-            on_bytes(0, self.total, new_file=True)
+        def __init__(self, *args, **kwargs):
+            # `unit` and the running count are kept here rather than read off tqdm,
+            # because the Hub decides for itself whether bars are disabled (log
+            # level, HF_HUB_DISABLE_PROGRESS_BARS) and a disabled tqdm
+            # short-circuits its own __init__: `unit` is never assigned and
+            # `update()` returns without advancing `n`. Reading either would raise
+            # AttributeError from inside the Hub's worker threads, which surfaces
+            # as a failed download rather than a missing progress bar.
+            self._byte_unit = kwargs.get("unit") == "B"
+            self._counted = int(kwargs.get("initial") or 0)
+            kwargs["file"] = _DevNull()
+            super().__init__(*args, **kwargs)
 
         def update(self, n=1):
-            self.n += n
-            on_bytes(n, self.total, new_file=False)
+            self._counted += int(n or 0)
+            if self._byte_unit:
+                counters[id(self)] = self._counted
+                on_progress(max(counters.values()))
+            return super().update(n)
 
-        def close(self): ...
-        def refresh(self): ...
-        def set_description(self, *a, **k): ...
-        def set_postfix(self, *a, **k): ...
-        def __enter__(self): return self
-        def __exit__(self, *a): self.close()
-
-    return Path(snapshot_download(repo_id=repo, tqdm_class=_ProgressTqdm))
+    return Path(
+        snapshot_download(repo_id=repo, allow_patterns=patterns, tqdm_class=_ProgressTqdm)
+    )
 
 
 class ModelDownloader:
@@ -164,26 +254,28 @@ class ModelDownloader:
     async def _run(self, model: BigBroModel) -> Path:
         loop = asyncio.get_running_loop()
         completed = 0
-        total = 0
         last_emit = 0.0
 
-        def on_bytes(delta: int, file_total: int, new_file: bool) -> None:
-            # Called from the Hub's worker thread — hop back to the loop to emit.
-            nonlocal completed, total, last_emit
-            if new_file:
-                total += file_total
-                return
-            completed += delta
+        self._emit(model.id, Progress("starting", 0, 0))
+        patterns = patterns_for(model)
+        total = await asyncio.to_thread(repo_total_bytes, model.repo, patterns)
+
+        def on_progress(furthest: int) -> None:
+            # Called from the Hub's worker threads — hop back to the loop to emit.
+            nonlocal completed, last_emit
+            # Monotonic: the counters can report out of order across threads, and a
+            # bar that appears to go backwards reads as a stalled or corrupt download.
+            completed = min(max(completed, furthest), total) if total else max(completed, furthest)
             now = time.monotonic()
             if now - last_emit < PROGRESS_INTERVAL:
                 return
             last_emit = now
-            snapshot = Progress("downloading", completed, total)
-            loop.call_soon_threadsafe(self._emit, model.id, snapshot)
+            loop.call_soon_threadsafe(
+                self._emit, model.id, Progress("downloading", completed, total)
+            )
 
-        self._emit(model.id, Progress("starting", 0, 0))
         try:
-            directory = await asyncio.to_thread(_snapshot, model.repo, on_bytes)
+            directory = await asyncio.to_thread(_snapshot, model.repo, patterns, on_progress)
         except Exception as exc:
             log.error("download failed for %s: %s", model.id, exc)
             self._emit(model.id, Progress("error", completed, total, done=True, error=str(exc)))
@@ -191,7 +283,9 @@ class ModelDownloader:
 
         self.record.record(model.id, directory)
         log.info("downloaded %s to %s", model.id, directory)
-        self._emit(model.id, Progress("complete", completed or total, total, done=True))
+        # Finish at the total rather than wherever the counters landed: files already
+        # cached are never counted, so a partly-cached repo would otherwise stop short.
+        self._emit(model.id, Progress("complete", total or completed, total, done=True))
         return directory
 
     def remove(self, model: BigBroModel) -> None:

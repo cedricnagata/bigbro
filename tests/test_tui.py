@@ -544,3 +544,33 @@ async def test_tab_reaches_the_settings_field_and_escape_leaves_it(daemon):
 
         await pilot.press("escape")
         assert await _settled(pilot, lambda: isinstance(app.focused, VerticalScroll))
+
+
+async def test_download_progress_updates_the_state_cell_not_another_column(daemon):
+    """The live update addressed the state column as "the last one".
+
+    That held until a `memory` column was added, after which progress was written
+    into the memory cell and the state only moved on the five-second poll — the
+    pane appeared frozen mid-download.
+    """
+    from textual.widgets import DataTable
+
+    app = BigBroApp(socket_path=daemon.socket_path)
+    async with app.run_test() as pilot:
+        table = app.query_one("#models-table", DataTable)
+        await _settled(pilot, lambda: table.row_count >= 2)
+        await _settled(pilot, lambda: daemon.bus.subscriber_count == 1)
+
+        def cells():
+            row = next(r for r in range(table.row_count)
+                       if str(table.get_cell_at((r, 0))) == "qwen3-4b")
+            return str(table.get_cell_at((row, 3))), str(table.get_cell_at((row, 4)))
+
+        daemon.bus.publish(
+            "download.progress", model="qwen3-4b", status="downloading",
+            completed=1_200_000_000, total=2_400_000_000, fraction=0.5,
+            done=False, error=None, state="downloading 50%",
+        )
+
+        assert await _settled(pilot, lambda: "50%" in cells()[0]), "state cell did not update"
+        assert "50%" not in cells()[1], "progress leaked into the memory column"

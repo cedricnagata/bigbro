@@ -150,6 +150,15 @@ class Daemon:
 
         if self._loop is not None:
             asyncio.ensure_future(self.server.broadcast(message))
+            if progress.done:
+                # The completion event is emitted from inside the download task, so
+                # the model still counts as downloading when its state is read for
+                # that event — the row would sit at "downloading 100%" until the
+                # next poll. Re-publish once the task has actually been retired.
+                asyncio.ensure_future(self._publish_settled_state(model_id))
+
+    async def _publish_settled_state(self, model_id: str) -> None:
+        self._publish_model_state(model_id)
 
     def _on_peer_change(self, device_id: str, connected: bool) -> None:
         """Announces a device connecting or dropping, so the Devices pane can move."""
