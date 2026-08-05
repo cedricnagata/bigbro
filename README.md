@@ -508,5 +508,11 @@ src/bigbro/
     ├── catalog.py          — the supported models and their hand-verified capabilities
     ├── parsers.py          — per-model output framing: harmony channels, <think> tags, or plain
     ├── engine.py           — mlx-lm/mlx-vlm lifecycle, templating, generation
+    ├── mlx_thread.py       — the one thread every MLX call runs on
     └── downloader.py       — Hub downloads with throttled progress
 ```
+
+`mlx_thread.py` is load-bearing rather than an optimization. MLX registers its streams per-thread,
+so a model loaded on one thread and generated from another raises `RuntimeError: There is no
+Stream(gpu, 1) in current thread`. Anything that calls into MLX — language, vision, Kokoro,
+Parakeet — goes through it.
