@@ -26,15 +26,35 @@ run separately. Your Mac downloads the models itself, on first use or from the C
 
 ## Installation
 
-BigBro is not published yet — install it from the repo:
+BigBro installs straight from the repository with [uv](https://docs.astral.sh/uv/) — there is
+nothing to clone and nothing to build:
+
+```sh
+uv tool install git+https://github.com/cedricnagata/bigbro
+```
+
+That puts `bigbro` on your PATH with its own interpreter and its own copy of the MLX stack, so
+nothing else on your machine is touched. Pin a release with `@v1.0.0`, or track the tip by
+re-running the same command with `--force`.
+
+Expect the first install to take a while and land around 1.4 GB: the MLX stack, `transformers`
+and spaCy are all pulled in, and none of them are small.
+
+> **BigBro is not on an index, and the install above is the supported one.** The name on PyPI
+> belongs to an unrelated project, so `pip install bigbro` gets you someone else's package and no
+> `bigbro` command. Building a wheel from this repo and installing *that* also fails — Kokoro's
+> phonemizer needs a spaCy model, spaCy models are not published to PyPI, and the URL that
+> resolves it lives in `[tool.uv.sources]`, which uv reads from the project rather than carrying
+> into a built artifact. Installing from git keeps that table in play, which is why it works.
+
+### Working on it
+
+For development, install from a clone so edits take effect without reinstalling:
 
 ```sh
 git clone https://github.com/cedricnagata/bigbro
 uv tool install --editable ./bigbro
 ```
-
-That puts `bigbro` on your PATH with its own interpreter and its own copy of the MLX stack, so
-nothing else on your machine is touched.
 
 `--editable` is deliberate: it links the tool to the working copy, so an edit to the source takes
 effect the next time you run `bigbro` with nothing to reinstall. Without it, `uv tool install
@@ -43,11 +63,10 @@ success, the old code keeps running, and the only symptom is a fix that appears 
 you do want a non-editable install, `uv cache clean bigbro && uv tool install --force --reinstall .`
 is what actually rebuilds.
 
-> **Don't `pip install bigbro`.** The name on PyPI belongs to an unrelated project, so you get
-> someone else's package and no `bigbro` command. A plain `pip install -e .` from this repo does
-> work, but installs into whichever Python is active — and the MLX stack pulls recent
-> `transformers`, `huggingface-hub`, `tokenizers`, `pydantic`, `fastapi` and `starlette`, which it
-> will upgrade for every other project sharing that interpreter.
+A plain `pip install -e .` from a clone does work, but installs into whichever Python is active —
+and the MLX stack pulls recent `transformers`, `huggingface-hub`, `tokenizers`, `pydantic`,
+`fastapi` and `starlette`, which it will upgrade for every other project sharing that interpreter.
+Use a venv if you go that way; see [Development](#development).
 
 ## Usage
 

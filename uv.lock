@@ -77,7 +77,7 @@ wheels = [
 
 [[package]]
 name = "bigbro"
-version = "2.0.0"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "en-core-web-sm", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
