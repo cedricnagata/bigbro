@@ -76,16 +76,24 @@ class PeerServer:
     async def stop(self) -> None:
         if self._server is not None:
             self._server.close()
-            with contextlib.suppress(Exception):
-                await self._server.wait_closed()
-            self._server = None
 
+        # Read loops and sockets go first, listener second. `Server.wait_closed()` does not
+        # return until every accepted connection's handler has finished, so waiting on it
+        # while a phone is still attached hangs shutdown outright.
         for task in list(self._read_tasks):
             task.cancel()
         self._read_tasks.clear()
 
         for conn in list(self._peers.values()) + list(self._pending.values()):
             self._close(conn)
+
+        if self._server is not None:
+            # Bounded, because a connection accepted in the instant before shutdown has a
+            # handler that is not in `_read_tasks` yet and so survives the cancellation
+            # above. The listener is already closed; this only drains what is left.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self._server.wait_closed(), 2.0)
+            self._server = None
 
         self._peers.clear()
         self._pending.clear()
@@ -100,6 +108,19 @@ class PeerServer:
         if conn is None:
             log.warning("register: no pending connection %s", connection_id)
             return
+        superseded = self._peers.get(device_id)
+        if superseded is not None and superseded is not conn:
+            # One device, two sockets — a reconnect that overlapped the old link. Close the
+            # loser here rather than leaving it open: its `_device_ids` entry is dropped
+            # first so its teardown is silent and the device is reported connected
+            # throughout, with no spurious disconnect in between.
+            log.info(
+                "device %s reconnected; closing superseded connection %s",
+                device_id[:8],
+                superseded.id[:8],
+            )
+            self._device_ids.pop(superseded.id, None)
+            self._close(superseded)
         self._peers[device_id] = conn
         self._device_ids[connection_id] = device_id
         self._last_heard[device_id] = time.monotonic()
@@ -228,6 +249,15 @@ class PeerServer:
 
         if device_id is None:
             log.info("pending connection %s closed before hello", conn.id[:8])
+            return
+
+        current = self._peers.get(device_id)
+        if current is not None and current is not conn:
+            # A newer socket from the same device already took this slot. Popping it here
+            # would unregister a peer that is very much still attached — and the device,
+            # told it had dropped, would reconnect into the same collision.
+            log.info("superseded connection %s closed; device %s still attached",
+                     conn.id[:8], device_id[:8])
             return
 
         self._peers.pop(device_id, None)

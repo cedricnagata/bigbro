@@ -190,6 +190,57 @@ async def test_known_device_reconnects_without_approval(harness):
     await client.close()
 
 
+async def test_second_connection_supersedes_the_first(harness):
+    """Two sockets, one deviceId — the newer wins and the older closes quietly.
+
+    A phone that reconnects while its old link is still open used to leave both
+    registered; whichever closed first unregistered the device, so the live socket
+    was told it had dropped and reconnected into the same collision.
+
+    Every observation is taken first and asserted at the end: an assertion that fires
+    mid-test would leave a client socket open, and the fixture's `server.stop()` has to
+    drain those before it can return.
+    """
+    first = await approved_client(harness, device_id="dup")
+    second = await approved_client(harness, device_id="dup")
+    await asyncio.sleep(0.05)
+    both_open = harness.server.connected_device_ids.count("dup")
+
+    # The superseded socket closing must not unregister the device...
+    await first.close()
+    await asyncio.sleep(0.05)
+    survived_first_close = harness.server.is_connected("dup")
+
+    # ...and the survivor is the socket that still carries traffic.
+    await harness.server.send({"type": "pong"}, to="dup")
+    try:
+        delivered = (await second.next(timeout=1.0))["type"]
+    except (asyncio.TimeoutError, ConnectionError):
+        delivered = None
+
+    await second.close()
+    await asyncio.sleep(0.05)
+    still_connected_at_end = harness.server.is_connected("dup")
+
+    assert both_open == 1
+    assert survived_first_close
+    assert delivered == "pong"
+    assert not still_connected_at_end
+
+
+async def test_stop_returns_with_a_peer_still_attached(harness):
+    """Shutdown must not wait on a phone to hang up first.
+
+    `Server.wait_closed()` only returns once every accepted connection's handler has
+    finished, so stopping the listener before cancelling the read loops left the daemon
+    wedged on quit for as long as a device stayed connected.
+    """
+    client = await approved_client(harness, device_id="lingering")
+    await asyncio.wait_for(harness.server.stop(), 5.0)
+    assert not harness.server.is_connected("lingering")
+    await client.close()
+
+
 async def test_hello_ack_reports_missing_models(harness):
     harness.engine.downloaded = False
     harness.pairing.approve("d3", "iPhone", "App", [])
