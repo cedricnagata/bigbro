@@ -239,7 +239,7 @@ public final class DaemonController {
 
     // MARK: - Finding something to run
 
-    struct Launch: Equatable {
+    nonisolated struct Launch: Equatable {
         let executable: String
         let arguments: [String]
     }
@@ -252,7 +252,11 @@ public final class DaemonController {
     /// `__main__.py` already guards `if __name__ == "__main__"`, so it works today.
     /// Takes the resources directory rather than a `Bundle` so the resolution
     /// order can be tested without one.
-    static func resolveLaunch(
+    ///
+    /// `nonisolated` because it is pure: environment variables and file checks,
+    /// no state on this class. Isolating it would only mean every caller and
+    /// every test had to hop to the main actor to ask a question about the disk.
+    nonisolated static func resolveLaunch(
         resources: URL? = Bundle.main.resourceURL,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         fileManager: FileManager = .default,

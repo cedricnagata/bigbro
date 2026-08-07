@@ -49,21 +49,15 @@ final class StubTransport: ControlTransport, @unchecked Sendable {
     }
 
     func reply(to command: String, with json: String) {
-        lock.lock()
-        replies[command] = Data(json.utf8)
-        lock.unlock()
+        lock.withLock { replies[command] = Data(json.utf8) }
     }
 
     var commands: [String] {
-        lock.lock()
-        defer { lock.unlock() }
-        return recorded.map(\.name)
+        lock.withLock { recorded.map(\.name) }
     }
 
     var sent: [Command] {
-        lock.lock()
-        defer { lock.unlock() }
-        return recorded
+        lock.withLock { recorded }
     }
 
     func count(of command: String) -> Int {
@@ -71,16 +65,16 @@ final class StubTransport: ControlTransport, @unchecked Sendable {
     }
 
     func forgetTraffic() {
-        lock.lock()
-        recorded.removeAll()
-        lock.unlock()
+        lock.withLock { recorded.removeAll() }
     }
 
     func send(_ command: Command) async throws -> Data {
-        lock.lock()
-        recorded.append(command)
-        let canned = replies[command.name]
-        lock.unlock()
+        // withLock rather than lock/unlock: this method is async, and holding a
+        // lock across a potential suspension point is a Swift 6 error.
+        let canned = lock.withLock { () -> Data? in
+            recorded.append(command)
+            return replies[command.name]
+        }
         return canned ?? Data(#"{"ok":true}"#.utf8)
     }
 }
