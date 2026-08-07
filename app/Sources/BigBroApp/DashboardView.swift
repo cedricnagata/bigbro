@@ -44,6 +44,7 @@ enum Pane: String, CaseIterable, Identifiable, Hashable {
     }
 }
 
+@MainActor
 struct DashboardView: View {
     @Environment(AppState.self) private var state
     @State private var selection: Pane = .devices
@@ -96,6 +97,7 @@ struct DashboardView: View {
     }
 }
 
+@MainActor
 struct StatusBar: View {
     @Environment(AppState.self) private var state
 
@@ -119,6 +121,7 @@ struct StatusBar: View {
     }
 }
 
+@MainActor
 struct PairingSheet: View {
     @Environment(AppState.self) private var state
     let request: PendingRequest

@@ -9,6 +9,7 @@ final class AppState {
     let client: ControlClient
     let dashboard: DashboardModel
     let daemon: DaemonController
+    let notifier = PairingNotifier()
 
     private var pump: Task<Void, Never>?
 
@@ -21,14 +22,26 @@ final class AppState {
 
     func begin() async {
         await daemon.startOrAttach()
+        notifier.start(dashboard: dashboard)
         guard pump == nil else { return }
         // One stream for the lifetime of the app. It reconnects on its own, so a
         // daemon that is restarted underneath us reattaches without anything here
         // having to notice.
         let events = client.events()
-        pump = Task { @MainActor [dashboard] in
+        pump = Task { @MainActor [dashboard, notifier] in
             for await event in events {
                 await dashboard.handle(event)
+                // The banner is what reaches someone who is not looking at
+                // BigBro; the sheet the model raised only helps if they are.
+                switch event {
+                case .pairingRequested(let request):
+                    notifier.notify(about: request)
+                case .pairingResolved(let deviceId, _, _):
+                    // Answered in the window, the menu bar, or another shell.
+                    notifier.withdraw(deviceId: deviceId)
+                default:
+                    break
+                }
             }
         }
     }
@@ -50,6 +63,7 @@ final class AppState {
 }
 
 @main
+@MainActor
 struct BigBroApp: App {
     @State private var state = AppState()
     @Environment(\.openWindow) private var openWindow
@@ -76,6 +90,7 @@ struct BigBroApp: App {
     }
 }
 
+@MainActor
 struct MenuBarContent: View {
     @Environment(AppState.self) private var state
     let openDashboard: () -> Void

@@ -1,6 +1,7 @@
 import BigBroControl
 import SwiftUI
 
+@MainActor
 struct DevicesPane: View {
     @Environment(AppState.self) private var state
     @State private var confirmingForgetAll = false
@@ -79,6 +80,7 @@ struct DevicesPane: View {
     }
 }
 
+@MainActor
 struct ModelPane: View {
     @Environment(AppState.self) private var state
     let family: String
@@ -152,6 +154,7 @@ struct ModelPane: View {
 /// The percentage is already in the state string — `DashboardModel` builds it from
 /// the event so a tick changes only the digits — so this parses it back out rather
 /// than tracking a second copy that could disagree with the text beside it.
+@MainActor
 struct StateCell: View {
     let model: ModelEntry
 
@@ -176,6 +179,7 @@ struct StateCell: View {
     }
 }
 
+@MainActor
 struct SettingsPane: View {
     @Environment(AppState.self) private var state
 
@@ -251,6 +255,7 @@ struct SettingsPane: View {
     }
 }
 
+@MainActor
 struct LogPane: View {
     @Environment(AppState.self) private var state
 
@@ -302,6 +307,7 @@ struct LogPane: View {
 /// Someone who installed from the DMG already has a complete Python and MLX
 /// stack on disk; making them `uv tool install` a second copy just to run
 /// `bigbro pair approve` would be silly.
+@MainActor
 struct CommandLineToolRow: View {
     @State private var status = CommandLineTool.status()
     @State private var problem: String?
