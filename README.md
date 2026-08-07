@@ -19,7 +19,9 @@ run separately. Your Mac downloads the models itself, on first use or from the C
 ## Requirements
 
 - macOS 14 Sonoma or later, Apple Silicon
-- Python 3.10+
+- Python 3.10–3.13, **only if you install the CLI with uv** — the app carries its own. The ceiling
+  is spaCy, which reaches this project through `mlx-audio` → `misaki` and publishes no `cp314`
+  wheels yet
 - Enough RAM for the models you run — a large pairing (gpt-oss-20b MXFP4 at ~12 GB plus a ~2 GB
   vision model) wants ~16 GB; the smaller Llama and Gemma models need far less
 - Nothing else — no separate server to install or keep running
@@ -63,10 +65,11 @@ If you installed the app, you do not need this: BigBro can install the same `big
 > built artifact. Installing from git keeps that table in play, which is why it works — and it is
 > also why the DMG is built by syncing the project rather than by building a wheel.
 
-> **Python 3.14 does not work yet on macOS.** spaCy publishes no `cp314` wheels, and it is pulled
-> in through `mlx-audio` → `misaki`, so `uv tool install` against a 3.14 interpreter fails while
-> resolving. Use 3.12 or 3.13 (`uv tool install --python 3.12 …`). The app is unaffected — it
-> carries 3.12 inside it.
+BigBro requires Python 3.10 to 3.13. The ceiling is the macOS dependency chain rather than the
+code: `mlx-audio` pulls in `misaki`, which pulls in spaCy, which publishes wheels only up to
+`cp313`. Because `requires-python` declares that, uv will pick a compatible interpreter for you
+even if your default is newer — you do not have to name one. The app is unaffected either way; it
+carries 3.12 inside it.
 
 ### Working on it
 
