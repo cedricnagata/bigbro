@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS is where bigbro runs, so it is the one that matters. Linux is kept
+        # because the platform markers in pyproject.toml deliberately keep the
+        # parsers, catalog, framing and pairing installable off macOS, and a break
+        # in that is easy to miss until someone tries to work on it from a laptop
+        # that is not a Mac.
+        os: [macos-14, ubuntu-latest]
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # `--frozen` so CI resolves exactly what uv.lock pins. A run that quietly
+      # re-resolved would be testing something nobody is going to install.
+      - name: Install
+        run: uv sync --frozen --extra dev
+
+      - name: Test
+        run: uv run pytest -q

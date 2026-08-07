@@ -12,6 +12,7 @@ and pinning the Mac awake are not side effects a test run should have.
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 import tempfile
 from pathlib import Path
@@ -154,3 +155,64 @@ def test_defaults_apply_with_no_config_file(tmp_path, monkeypatch):
     daemon = Daemon()
     assert daemon.port == 8765
     assert daemon.keep_awake is True
+
+
+# MARK: - Serving without a dashboard in this process
+
+
+class _FakeDaemon:
+    """Just the two attributes `_serve_plain` touches: an event bus and `run()`."""
+
+    def __init__(self, message: str):
+        from bigbro.events import EventBus
+
+        self.events = EventBus()
+        self._message = message
+
+    async def run(self) -> None:
+        logging.getLogger("bigbro.test-serve-plain").warning(self._message)
+
+
+@pytest.fixture
+def pristine_root_logger():
+    """Restores root's handlers, since `_serve_plain` installs one on it."""
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        yield root
+    finally:
+        for handler in [h for h in root.handlers if h not in before]:
+            root.removeHandler(handler)
+
+
+async def test_serving_without_a_dashboard_still_publishes_log_events(pristine_root_logger):
+    """A client attached over the socket cannot see our stderr, only the bus.
+
+    This was silently broken for `--no-ui`: the handler was installed inside the
+    dashboard path only, so a daemon started with plain logs — or under launchd —
+    published no `log` events at all, and an attached UI's log pane stayed empty
+    for exactly the case that needs it most.
+    """
+    from bigbro.__main__ import _serve_plain
+
+    daemon = _FakeDaemon("port already in use")
+    queue = daemon.events.subscribe()
+
+    await _serve_plain(daemon)
+
+    event = await asyncio.wait_for(queue.get(), 1)
+    assert event["event"] == "log"
+    assert event["level"] == "WARNING"
+    assert event["message"] == "port already in use"
+
+
+async def test_serving_without_a_dashboard_keeps_logs_on_stderr(pristine_root_logger):
+    """Nothing owns stdout here, so the logs someone ran `serve` to watch stay put."""
+    from bigbro.__main__ import _serve_plain
+
+    stream_handler = logging.StreamHandler()
+    pristine_root_logger.addHandler(stream_handler)
+
+    await _serve_plain(_FakeDaemon("still visible"))
+
+    assert stream_handler in pristine_root_logger.handlers

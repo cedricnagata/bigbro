@@ -1,0 +1,34 @@
+{
+  "ok": true,
+  "name": "Test Mac",
+  "port": 8765,
+  "keepAwake": false,
+  "paired": 0,
+  "connected": [],
+  "pending": [],
+  "running": [],
+  "downloaded": [],
+  "speech": {
+    "tts": {
+      "name": "Kokoro 82M",
+      "model": "kokoro",
+      "state": "not downloaded"
+    },
+    "stt": {
+      "name": "Parakeet TDT 0.6B v3",
+      "model": "parakeet",
+      "state": "not downloaded"
+    }
+  },
+  "memory": {
+    "footprint": null,
+    "total": null,
+    "weights": null,
+    "peak": null,
+    "pressure": null,
+    "headline": null,
+    "resident": null,
+    "mlx": {},
+    "models": {}
+  }
+}

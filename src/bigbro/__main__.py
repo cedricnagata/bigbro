@@ -92,10 +92,30 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     use_ui = not args.no_ui and sys.stdout.isatty() and sys.stdin.isatty()
     try:
-        asyncio.run(_serve_with_ui(daemon) if use_ui else daemon.run())
+        asyncio.run(_serve_with_ui(daemon) if use_ui else _serve_plain(daemon))
     except KeyboardInterrupt:
         pass
     return 0
+
+
+async def _serve_plain(daemon) -> None:
+    """Runs the daemon with logs on stderr, mirrored onto the event bus.
+
+    The bus handler matters even though nothing in *this* process renders it: a
+    client attached over the control socket reads its log view from those events
+    and can no more see this stderr than it could see a launchd daemon's. Without
+    this, `--no-ui` publishes no `log` events at all — the exact gap
+    `LogEventHandler` exists to close — and an attached UI shows an empty log for
+    the case that needs it most.
+
+    Unlike the dashboard path this *adds* the handler rather than replacing the
+    stream one: nothing here owns stdout, so the logs someone ran `serve` to watch
+    stay where they are.
+    """
+    from .events import LogEventHandler
+
+    logging.getLogger().addHandler(LogEventHandler(daemon.events))
+    await daemon.run()
 
 
 async def _serve_with_ui(daemon) -> None:

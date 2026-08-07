@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "settings": {
+    "port": 8765,
+    "keep_awake": true,
+    "log_level": "INFO"
+  },
+  "editable": [
+    "port",
+    "keep_awake",
+    "log_level"
+  ]
+}
