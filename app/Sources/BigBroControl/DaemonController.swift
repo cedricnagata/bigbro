@@ -239,7 +239,7 @@ public final class DaemonController {
 
     // MARK: - Finding something to run
 
-    nonisolated struct Launch: Equatable {
+    struct Launch: Equatable {
         let executable: String
         let arguments: [String]
     }
