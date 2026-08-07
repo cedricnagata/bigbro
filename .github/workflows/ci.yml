@@ -1,9 +1,15 @@
 name: CI
 
+# Every branch, not just main. Work here happens on branches for a while before
+# it becomes a pull request, and a check that only runs at the end is a check
+# that finds things at the worst possible moment.
+#
+# `pull_request` is kept for forks, which do not raise `push` on this repository —
+# and skipped for branches that do, so a same-repo PR is not built twice.
 on:
   push:
-    branches: [main]
   pull_request:
+    branches: [main]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -12,6 +18,9 @@ concurrency:
 jobs:
   test:
     name: pytest (${{ matrix.os }})
+    if: >
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -42,6 +51,9 @@ jobs:
 
   swift:
     name: swift test
+    if: >
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name != github.repository
     # arm64, and the oldest macOS image GitHub offers — which is also the floor
     # the app targets and the one the mlx wheels will be selected against when
     # the runtime gets bundled.
