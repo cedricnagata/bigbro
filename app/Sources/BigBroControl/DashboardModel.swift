@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 /// Everything the dashboard knows, and every rule about when to re-read it.
 ///
@@ -11,6 +12,10 @@ import Foundation
 ///
 /// The daemon stays the authority on ordering and on state wording. Nothing here
 /// sorts a model list.
+/// `@Observable` rather than `ObservableObject`: it is in the Observation module,
+/// not SwiftUI, so the library stays free of any UI framework while still driving
+/// one. macOS 14 is the floor for both.
+@Observable
 @MainActor
 public final class DashboardModel {
     /// Matches the Textual log's backlog. Enough to scroll through an incident,

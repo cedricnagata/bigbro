@@ -93,3 +93,21 @@ jobs:
 
       - name: Test
         run: swift test --package-path app
+
+      # Assembles the bundle without a Python runtime inside it. Cheap, and it
+      # catches the things that only break at assembly time — a bad Info.plist,
+      # a PlistBuddy key that moved, a binary SwiftPM put somewhere else.
+      - name: Assemble an unsigned app
+        run: |
+          swift build --package-path app -c release --arch arm64
+          app/Scripts/make-app.sh \
+            "$(swift build --package-path app -c release --arch arm64 --show-bin-path)" \
+            build 0.0.0-ci
+          test -x build/BigBro.app/Contents/MacOS/BigBroApp
+          plutil -lint build/BigBro.app/Contents/Info.plist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BigBro-unsigned
+          path: build/BigBro.app
+          retention-days: 7

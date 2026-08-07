@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Reasoned, not cargo-culted. Each of these is here because something in the
+	     bundled Python stack breaks without it.
+
+	     App Sandbox is deliberately ABSENT. With it on, ~/Library/Application
+	     Support/bigbro moves into a container, and the CLI installed alongside
+	     this app would then be reading a different devices.json, config.json and
+	     control.sock than the app writes — which breaks the entire premise that
+	     both talk to one daemon. The cost is that BigBro can never ship on the Mac
+	     App Store; Developer ID and a DMG are the distribution story. -->
+
+	<!-- macos/bonjour.py builds a ctypes.CFUNCTYPE callback and hands it to
+	     DNSServiceRegister, deliberately retaining it so mDNSResponder is not left
+	     calling freed memory. That is a libffi closure — executable memory written
+	     at runtime — and it happens on every single `serve`, so without this the
+	     daemon does not start at all. -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+
+	<!-- sounddevice and espeakng-loader dlopen dylibs by absolute path out of
+	     site-packages, and torch and MLX load their own. Everything in the bundle
+	     is re-signed with one identity, so this might be survivable — but a single
+	     binary missed by the signing script becomes a hard runtime crash instead
+	     of a warning. -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+
+	<!-- torch's inductor paths and llguidance can map executable pages without
+	     MAP_JIT. Worth trying to remove later and re-testing every path — TTS
+	     especially, which runs misaki -> spaCy -> espeak. -->
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+</dict>
+</plist>

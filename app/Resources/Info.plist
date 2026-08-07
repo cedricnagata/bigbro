@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>BigBro</string>
+	<key>CFBundleDisplayName</key>
+	<string>BigBro</string>
+	<key>CFBundleExecutable</key>
+	<string>BigBroApp</string>
+
+	<!-- Permanent. TCC and notification grants key off this, so changing it would
+	     silently drop every permission the user has already given. -->
+	<key>CFBundleIdentifier</key>
+	<string>com.cedricnagata.bigbro</string>
+
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+
+	<!-- make-app.sh rewrites both from the release tag. -->
+	<key>CFBundleShortVersionString</key>
+	<string>0.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>0</string>
+
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.developer-tools</string>
+
+	<!-- MLX is Apple silicon only. Under Rosetta the whole bundled stack would
+	     fail to import, so refuse rather than half-start. -->
+	<key>LSRequiresNativeExecution</key>
+	<true/>
+
+	<!-- The daemon advertises _bigbro._tcp. and listens on 8765. As a terminal
+	     process that prompt was attributed to Terminal; as a bundled app it is
+	     attributed to BigBro, and macOS 14+ will ask on first advertise.
+
+	     If the user says no, Bonjour registration silently stops working and no
+	     iOS device can discover this Mac — with nothing in the daemon's log to
+	     explain it. That is the most likely "I installed it and nothing happened"
+	     report, so the wording here matters. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>BigBro advertises itself on your local network so nearby iPhones and iPads can discover this Mac and use it for inference.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_bigbro._tcp</string>
+	</array>
+
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<!-- Not an agent: there is a real window. The menu bar item is additional. -->
+	<key>LSUIElement</key>
+	<false/>
+</dict>
+</plist>

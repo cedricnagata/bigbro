@@ -12,10 +12,15 @@ let package = Package(
     name: "BigBro",
     platforms: [.macOS(.v14)],
     products: [
-        .library(name: "BigBroControl", targets: ["BigBroControl"])
+        .library(name: "BigBroControl", targets: ["BigBroControl"]),
+        .executable(name: "BigBroApp", targets: ["BigBroApp"])
     ],
     targets: [
         .target(name: "BigBroControl"),
+        // Produces a bare Mach-O, not a bundle. `Scripts/make-app.sh` assembles
+        // BigBro.app around it — macOS decides what is an app by layout, so a
+        // binary at Contents/MacOS with an Info.plist beside it behaves normally.
+        .executableTarget(name: "BigBroApp", dependencies: ["BigBroControl"]),
         .testTarget(name: "BigBroControlTests", dependencies: ["BigBroControl"])
     ]
 )
