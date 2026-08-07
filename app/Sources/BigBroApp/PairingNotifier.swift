@@ -17,10 +17,13 @@ import UserNotifications
 /// item still work, so nothing is lost but the convenience.
 @MainActor
 final class PairingNotifier: NSObject, UNUserNotificationCenterDelegate {
-    private static let category = "pairing"
-    private static let approve = "pairing.approve"
-    private static let deny = "pairing.deny"
-    private static let deviceKey = "deviceId"
+    // nonisolated because the delegate callbacks arrive off the main actor and
+    // need to read them before hopping. They are immutable strings; there is
+    // nothing for isolation to protect.
+    private nonisolated static let category = "pairing"
+    private nonisolated static let approve = "pairing.approve"
+    private nonisolated static let deny = "pairing.deny"
+    private nonisolated static let deviceKey = "deviceId"
 
     private weak var dashboard: DashboardModel?
     private var available = false
