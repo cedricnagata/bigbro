@@ -25,7 +25,6 @@ classifiers = [
 dependencies = [
     "huggingface-hub>=0.27",
     "numpy>=1.26",
-    "textual>=0.80",
     "mlx-lm>=0.28; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "mlx-vlm>=0.3; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "mlx-audio>=0.4.6; sys_platform == 'darwin' and platform_machine == 'arm64'",

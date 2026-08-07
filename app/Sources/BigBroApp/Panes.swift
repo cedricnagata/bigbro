@@ -233,6 +233,10 @@ struct SettingsPane: View {
                         .foregroundStyle(.secondary)
                 }
             }
+
+            Section("Command line") {
+                CommandLineToolRow()
+            }
         }
         .formStyle(.grouped)
         .onAppear { if !loaded { syncFromModel(); loaded = true } }
@@ -289,6 +293,60 @@ struct LogPane: View {
         case "WARNING": return .orange
         case "DEBUG": return .secondary
         default: return .primary
+        }
+    }
+}
+
+/// Offers to put `bigbro` on PATH, pointing at the interpreter inside this app.
+///
+/// Someone who installed from the DMG already has a complete Python and MLX
+/// stack on disk; making them `uv tool install` a second copy just to run
+/// `bigbro pair approve` would be silly.
+struct CommandLineToolRow: View {
+    @State private var status = CommandLineTool.status()
+    @State private var problem: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            switch status {
+            case .notInstalled:
+                Button("Install Command Line Tool") { install() }
+                Text("Adds `bigbro` to ~/.local/bin, so the CLI drives this same daemon.")
+                    .font(.caption).foregroundStyle(.secondary)
+
+            case .current:
+                Label("`bigbro` is installed", systemImage: "checkmark.circle")
+                    .foregroundStyle(.green)
+                if !CommandLineTool.destinationIsOnPath() {
+                    // Installed but unreachable looks exactly like installed, so
+                    // say it rather than letting "command not found" be the hint.
+                    Text("~/.local/bin is not on your PATH — add it to your shell profile.")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+
+            case .stale(let pointingAt):
+                Button("Repair Command Line Tool") { install() }
+                Text("The installed `bigbro` points somewhere else (\(pointingAt)). BigBro was probably moved.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            if let problem {
+                Text(problem).font(.caption).foregroundStyle(.red)
+            }
+        }
+    }
+
+    private func install() {
+        problem = nil
+        guard CommandLineTool.bundledInterpreter() != nil else {
+            problem = "This build has no bundled runtime, so there is nothing to point a shim at."
+            return
+        }
+        do {
+            try CommandLineTool.install()
+            status = CommandLineTool.status()
+        } catch {
+            problem = "Could not write the shim: \(error.localizedDescription)"
         }
     }
 }

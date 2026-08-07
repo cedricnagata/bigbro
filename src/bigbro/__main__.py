@@ -1,6 +1,8 @@
 """The `bigbro` command.
 
-`serve` runs the daemon. Everything else is a thin client that sends one command
+`serve` runs the daemon; BigBro.app and every other verb are clients of it.
+
+Everything but `serve` is a thin client that sends one command
 over the control socket and prints the reply, so `bigbro pair approve` works from any
 shell while the daemon runs in another — or under launchd with no terminal at all.
 """
@@ -9,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import logging
 import sys
 
@@ -40,13 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="let the Mac sleep normally instead of holding it awake while serving",
     )
-    serve.add_argument(
-        "--no-ui",
-        action="store_true",
-        help="plain logs instead of the dashboard, even on a terminal",
-    )
+    # Accepted and ignored. `serve` has only ever done one thing since the
+    # dashboard moved into BigBro.app, but this flag is in people's launchd
+    # plists and shell history, and BigBro.app itself passes it — failing on it
+    # would break the app for the sake of tidiness.
+    serve.add_argument("--no-ui", action="store_true", help=argparse.SUPPRESS)
 
-    sub.add_parser("ui", help="attach the dashboard to a running daemon")
     sub.add_parser("status", help="show what the running daemon is doing")
 
     pair = sub.add_parser("pair", help="manage paired devices").add_subparsers(dest="action", required=True)
@@ -90,15 +90,14 @@ def cmd_serve(args: argparse.Namespace) -> int:
     keep_awake = False if args.no_keep_awake else None
     daemon = Daemon(port=args.port, keep_awake=keep_awake)
 
-    use_ui = not args.no_ui and sys.stdout.isatty() and sys.stdin.isatty()
     try:
-        asyncio.run(_serve_with_ui(daemon) if use_ui else _serve_plain(daemon))
+        asyncio.run(_serve(daemon))
     except KeyboardInterrupt:
         pass
     return 0
 
 
-async def _serve_plain(daemon) -> None:
+async def _serve(daemon) -> None:
     """Runs the daemon with logs on stderr, mirrored onto the event bus.
 
     The bus handler matters even though nothing in *this* process renders it: a
@@ -116,77 +115,6 @@ async def _serve_plain(daemon) -> None:
 
     logging.getLogger().addHandler(LogEventHandler(daemon.events))
     await daemon.run()
-
-
-async def _serve_with_ui(daemon) -> None:
-    """Runs the daemon and the dashboard together, on one event loop.
-
-    The dashboard still talks over the control socket rather than reaching into the
-    daemon object, so this is the same code path `bigbro ui` takes — one
-    implementation, and the attached case cannot quietly diverge from this one.
-    """
-    from .events import LogEventHandler
-    from .tui import BigBroApp
-
-    # Stdout belongs to the TUI now. Log records reach the UI through the event bus
-    # instead; left on stdout they would tear the rendering apart.
-    root = logging.getLogger()
-    stream_handlers = [h for h in root.handlers if isinstance(h, logging.StreamHandler)]
-    for handler in stream_handlers:
-        root.removeHandler(handler)
-    root.addHandler(LogEventHandler(daemon.events))
-
-    server = asyncio.create_task(daemon.run())
-    app = BigBroApp(owns_daemon=True)
-
-    def daemon_died(task: asyncio.Task) -> None:
-        """Takes the UI down with the daemon, carrying the real reason.
-
-        Without this a daemon that fails to start leaves the dashboard up and
-        retrying, reporting only that it cannot find a control socket — which
-        describes the symptom and hides the cause (a port already in use, a
-        permission denied, a crash on startup).
-        """
-        if task.cancelled():
-            return
-        error = task.exception()
-        if error is not None:
-            app.daemon_error = error
-            if app.is_running:
-                app.exit()
-
-    server.add_done_callback(daemon_died)
-
-    try:
-        await app.run_async()
-    finally:
-        daemon.stop()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await asyncio.wait_for(server, timeout=10)
-
-    if getattr(app, "daemon_error", None) is not None:
-        raise SystemExit(f"error: the daemon stopped: {app.daemon_error}")
-
-
-def cmd_ui(_args: argparse.Namespace) -> int:
-    """Attaches the dashboard to a daemon started elsewhere. Quitting leaves it running."""
-    from .control import ControlClientError
-    from .tui import BigBroApp
-
-    async def main() -> None:
-        # Fail here with the actionable message rather than opening an empty
-        # dashboard that silently retries against nothing.
-        try:
-            await send_command({"command": "status"})
-        except ControlClientError as exc:
-            raise SystemExit(f"error: {exc}")
-        await BigBroApp(owns_daemon=False).run_async()
-
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
-    return 0
 
 
 # MARK: - control-socket commands
@@ -382,8 +310,6 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "serve":
         return cmd_serve(args)
-    if args.command == "ui":
-        return cmd_ui(args)
     if args.command == "status":
         return cmd_status(args)
     if args.command == "pair":

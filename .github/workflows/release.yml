@@ -1,0 +1,164 @@
+name: Release
+
+# A merged pull request labelled `release` cuts one. `workflow_dispatch` is the
+# manual path — and the only one available to a fork, since a `pull_request`
+# event from one receives no secrets and so could never sign anything anyway.
+on:
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and sign, but publish nothing"
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+       contains(github.event.pull_request.labels.*.name, 'release'))
+
+    # arm64, and the oldest macOS image GitHub offers. Both matter: mlx and
+    # mlx-metal publish macOS-version-tagged wheels (macosx_14_0, _15_0, _26_0)
+    # and uv picks whichever matches the *build* machine — so building here is
+    # what lets the DMG run on macOS 14. When this image is retired, the choice
+    # is a self-hosted M-series box or raising the app's floor.
+    runs-on: macos-14
+    timeout-minutes: 120
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The merged result, not whatever main has drifted to since.
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.merge_commit_sha || github.ref }}
+          fetch-depth: 0
+
+      - name: Read the version
+        id: version
+        run: |
+          VERSION="$(python3 -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+          # Forgetting the version bump is the obvious failure mode, and it should
+          # cost twenty seconds rather than an hour of macOS runner time.
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "::error::Tag v$VERSION already exists. Bump version in pyproject.toml."
+            exit 1
+          fi
+          echo "Releasing v$VERSION"
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          # See ci.yml: spaCy publishes no cp314 wheels, and the macOS runners
+          # default to 3.14. This is also the interpreter that gets bundled.
+          python-version: "3.12"
+
+      - name: Build the app
+        run: |
+          swift build --package-path app -c release --arch arm64
+          BIN="$(swift build --package-path app -c release --arch arm64 --show-bin-path)"
+          app/Scripts/make-app.sh "$BIN" build "${{ steps.version.outputs.version }}"
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "14.0"
+
+      - name: Stage the Python runtime
+        run: app/Scripts/stage-runtime.sh build/BigBro.app
+
+      # Signing is gated on the secrets being present, so a fork or a dry run
+      # still produces an installable-for-testing app instead of failing.
+      - name: Are we able to sign?
+        id: signing
+        run: |
+          if [ -n "${{ secrets.MACOS_CERT_P12 }}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No signing secrets — building an unsigned app. Gatekeeper will refuse it."
+          fi
+
+      - name: Import the signing identity
+        if: steps.signing.outputs.enabled == 'true'
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.MACOS_CERT_P12 }}
+          p12-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+
+      - name: Sign
+        if: steps.signing.outputs.enabled == 'true'
+        run: |
+          app/Scripts/sign.sh build/BigBro.app "Developer ID Application: ${{ secrets.APPLE_TEAM_NAME }} (${{ secrets.APPLE_TEAM_ID }})"
+          app/Scripts/verify-signing.sh build/BigBro.app
+
+      - name: Notarize the app
+        if: steps.signing.outputs.enabled == 'true'
+        run: |
+          echo "${{ secrets.APPLE_API_KEY_P8 }}" > /tmp/api-key.p8
+          ditto -c -k --keepParent build/BigBro.app /tmp/BigBro.zip
+          xcrun notarytool submit /tmp/BigBro.zip \
+            --key /tmp/api-key.p8 \
+            --key-id "${{ secrets.APPLE_API_KEY_ID }}" \
+            --issuer "${{ secrets.APPLE_API_ISSUER_ID }}" \
+            --wait
+          # Stapling the app as well as the DMG: a user who copies to
+          # /Applications and goes offline before first launch would otherwise
+          # leave Gatekeeper with no ticket to find.
+          xcrun stapler staple build/BigBro.app
+
+      - name: Build the DMG
+        run: |
+          app/Scripts/make-dmg.sh build/BigBro.app \
+            "build/BigBro-${{ steps.version.outputs.version }}-arm64.dmg"
+
+      - name: Sign, notarize and staple the DMG
+        if: steps.signing.outputs.enabled == 'true'
+        run: |
+          DMG="build/BigBro-${{ steps.version.outputs.version }}-arm64.dmg"
+          codesign --force --timestamp \
+            --sign "Developer ID Application: ${{ secrets.APPLE_TEAM_NAME }} (${{ secrets.APPLE_TEAM_ID }})" "$DMG"
+          xcrun notarytool submit "$DMG" \
+            --key /tmp/api-key.p8 \
+            --key-id "${{ secrets.APPLE_API_KEY_ID }}" \
+            --issuer "${{ secrets.APPLE_API_ISSUER_ID }}" \
+            --wait
+          xcrun stapler staple "$DMG"
+
+      - name: Checksum
+        run: |
+          cd build
+          shasum -a 256 "BigBro-${{ steps.version.outputs.version }}-arm64.dmg" \
+            > "BigBro-${{ steps.version.outputs.version }}-arm64.dmg.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BigBro-${{ steps.version.outputs.version }}
+          path: build/*.dmg*
+
+      - name: Publish the release
+        if: ${{ github.event_name == 'pull_request' || !inputs.dry_run }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: BigBro ${{ steps.version.outputs.version }}
+          body: |
+            ${{ github.event.pull_request.title }}
+
+            ${{ github.event.pull_request.body }}
+          files: build/*.dmg*
+          fail_on_unmatched_files: true
+
+      - name: Clean up the signing keychain
+        if: always()
+        run: |
+          rm -f /tmp/api-key.p8
+          security delete-keychain signing_temp.keychain 2>/dev/null || true

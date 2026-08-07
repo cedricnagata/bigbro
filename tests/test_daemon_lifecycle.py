@@ -161,7 +161,7 @@ def test_defaults_apply_with_no_config_file(tmp_path, monkeypatch):
 
 
 class _FakeDaemon:
-    """Just the two attributes `_serve_plain` touches: an event bus and `run()`."""
+    """Just the two attributes `_serve` touches: an event bus and `run()`."""
 
     def __init__(self, message: str):
         from bigbro.events import EventBus
@@ -170,12 +170,12 @@ class _FakeDaemon:
         self._message = message
 
     async def run(self) -> None:
-        logging.getLogger("bigbro.test-serve-plain").warning(self._message)
+        logging.getLogger("bigbro.test-serve").warning(self._message)
 
 
 @pytest.fixture
 def pristine_root_logger():
-    """Restores root's handlers, since `_serve_plain` installs one on it."""
+    """Restores root's handlers, since `_serve` installs one on it."""
     root = logging.getLogger()
     before = list(root.handlers)
     try:
@@ -193,12 +193,12 @@ async def test_serving_without_a_dashboard_still_publishes_log_events(pristine_r
     published no `log` events at all, and an attached UI's log pane stayed empty
     for exactly the case that needs it most.
     """
-    from bigbro.__main__ import _serve_plain
+    from bigbro.__main__ import _serve
 
     daemon = _FakeDaemon("port already in use")
     queue = daemon.events.subscribe()
 
-    await _serve_plain(daemon)
+    await _serve(daemon)
 
     event = await asyncio.wait_for(queue.get(), 1)
     assert event["event"] == "log"
@@ -208,11 +208,11 @@ async def test_serving_without_a_dashboard_still_publishes_log_events(pristine_r
 
 async def test_serving_without_a_dashboard_keeps_logs_on_stderr(pristine_root_logger):
     """Nothing owns stdout here, so the logs someone ran `serve` to watch stay put."""
-    from bigbro.__main__ import _serve_plain
+    from bigbro.__main__ import _serve
 
     stream_handler = logging.StreamHandler()
     pristine_root_logger.addHandler(stream_handler)
 
-    await _serve_plain(_FakeDaemon("still visible"))
+    await _serve(_FakeDaemon("still visible"))
 
     assert stream_handler in pristine_root_logger.handlers

@@ -30,18 +30,57 @@ public final class DaemonController {
     /// dashboard waited.
     private static let terminationGrace: TimeInterval = 10
 
-    /// Enough stderr to explain a startup crash without holding a log file.
-    private static let stderrLines = 40
-
     public private(set) var mode: Mode = .stopped
     /// Set when the daemon exits without being asked to. Carries the real reason.
     public private(set) var failure: String?
 
+    /// The daemon's last words, kept off the main actor.
+    ///
+    /// A pipe's readability handler fires on a Dispatch queue, not here, so this
+    /// cannot be actor-isolated state guarded by a lock — it has to be genuinely
+    /// nonisolated, with the locking inside.
+    private final class StderrTail: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lines: [String] = []
+        private let limit: Int
+
+        /// Enough to explain a startup crash without holding a log file.
+        init(limit: Int = 40) { self.limit = limit }
+
+        func append(_ text: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+                lines.append(String(line))
+            }
+            if lines.count > limit {
+                lines.removeFirst(lines.count - limit)
+            }
+        }
+
+        func clear() {
+            lock.lock()
+            lines.removeAll()
+            lock.unlock()
+        }
+
+        var joined: String {
+            lock.lock()
+            defer { lock.unlock() }
+            return lines.joined(separator: "\n")
+        }
+
+        var lastLine: String? {
+            lock.lock()
+            defer { lock.unlock() }
+            return lines.last
+        }
+    }
+
     private let socketPath: String
     private let client: ControlClient
     private var process: Process?
-    private var stderrTail: [String] = []
-    private let stderrLock = NSLock()
+    private let stderr = StderrTail()
 
     public init(client: ControlClient) {
         self.client = client
@@ -84,9 +123,7 @@ public final class DaemonController {
         }
 
         failure = nil
-        stderrLock.lock()
-        stderrTail.removeAll()
-        stderrLock.unlock()
+        stderr.clear()
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: launch.executable)
@@ -114,12 +151,13 @@ public final class DaemonController {
         task.standardError = errorPipe
         task.standardOutput = Pipe()
 
-        // Both pipes are drained. A Process whose 64 KB pipe buffer fills blocks
-        // the child on write, which would wedge the daemon rather than the UI.
-        errorPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        // Both pipes must be drained even when nobody reads them: a Process whose
+        // 64 KB pipe buffer fills blocks the child on write.
+        let tail = stderr
+        errorPipe.fileHandleForReading.readabilityHandler = { handle in
             let chunk = handle.availableData
             guard !chunk.isEmpty, let text = String(data: chunk, encoding: .utf8) else { return }
-            self?.appendStderr(text)
+            tail.append(text)
         }
         (task.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = { handle in
             _ = handle.availableData
@@ -140,22 +178,7 @@ public final class DaemonController {
         mode = .owned
     }
 
-    private nonisolated func appendStderr(_ text: String) {
-        stderrLock.lock()
-        defer { stderrLock.unlock() }
-        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-            stderrTail.append(String(line))
-        }
-        if stderrTail.count > Self.stderrLines {
-            stderrTail.removeFirst(stderrTail.count - Self.stderrLines)
-        }
-    }
-
-    public var recentStderr: String {
-        stderrLock.lock()
-        defer { stderrLock.unlock() }
-        return stderrTail.joined(separator: "\n")
-    }
+    public var recentStderr: String { stderr.joined }
 
     /// The daemon went away without being asked to.
     ///
@@ -167,9 +190,7 @@ public final class DaemonController {
         process = nil
         mode = .stopped
 
-        let tail = recentStderr
-        let reason = tail.split(separator: "\n").last.map(String.init)
-        failure = reason.map { "The daemon stopped: \($0)" }
+        failure = stderr.lastLine.map { "The daemon stopped: \($0)" }
             ?? "The daemon stopped unexpectedly (exit code \(finished.terminationStatus))."
     }
 

@@ -1,10 +1,14 @@
 """The whole pairing path, with nothing stubbed but inference.
 
-A real Daemon, its real control socket, a real TCP client speaking the real framed
-protocol, and the real dashboard attached. This is the test that would catch the
-event bus, the subscribe stream, the modal and the approval command drifting apart
-from each other — each of which is covered in isolation elsewhere and could still
-fail to add up.
+A real Daemon, its real control socket, and a real TCP client speaking the real
+framed protocol. This is the test that would catch the event bus, the subscribe
+stream and the approval command drifting apart from each other — each of which is
+covered in isolation elsewhere and could still fail to add up.
+
+The dashboard used to be the fourth party here, driven through Textual. It now
+lives in BigBro.app, which is tested against this same socket from Swift, so what
+remains is the daemon's half of that conversation: the event a client must see,
+and the command it sends back.
 
 Bonjour and the power assertion are deliberately not started: they are global
 side effects (a service published on the LAN, the Mac held awake) that a test run
@@ -20,8 +24,8 @@ from pathlib import Path
 
 import pytest
 
+from bigbro.control import send_command, subscribe
 from bigbro.protocol.framing import FrameDecoder, encode
-from bigbro.tui import BigBroApp, PairingPrompt
 
 
 @pytest.fixture
@@ -82,121 +86,123 @@ class PhoneClient:
         self.writer.close()
 
 
-async def _settled(pilot, predicate, timeout=5.0) -> bool:
-    deadline = asyncio.get_running_loop().time() + timeout
-    while asyncio.get_running_loop().time() < deadline:
-        await pilot.pause()
-        if predicate():
-            return True
-        await asyncio.sleep(0.05)
+async def _await_event(events, name, timeout=5.0) -> dict:
+    """The next event of a given kind, ignoring whatever else is in flight.
+
+    Model state and log records share this stream, so a test waiting on a pairing
+    request cannot simply take the first thing that arrives.
+    """
+    async def scan():
+        async for event in events:
+            if event.get("event") == name:
+                return event
+        raise AssertionError(f"stream ended before {name!r} arrived")
+
+    return await asyncio.wait_for(scan(), timeout)
+
+
+async def _no_event(events, name, window=0.5) -> bool:
+    """True if nothing of that kind shows up within the window."""
+    try:
+        await _await_event(events, name, timeout=window)
+    except (asyncio.TimeoutError, AssertionError):
+        return True
     return False
 
 
-async def test_phone_connects_prompt_appears_enter_approves(live):
-    """The entire feature, in the order a person experiences it."""
-    app = BigBroApp(socket_path=live.socket_path)
-    async with app.run_test() as pilot:
-        assert await _settled(pilot, lambda: live.events.subscriber_count == 1)
+async def test_a_phone_connecting_announces_itself_and_approval_lets_it_in(live):
+    """The whole pairing conversation: event out, decision in, phone told."""
+    async with subscribe(live.socket_path) as events:
+        await asyncio.sleep(0.05)  # let the subscription register
 
         phone = await PhoneClient.connect(live.tcp_port)
-        await phone.send({
-            "type": "hello", "deviceId": "iphone-1", "deviceName": "Cedric's iPhone",
-            "appName": "MyApp", "requiredModels": [],
-        })
+        await phone.send({"type": "hello", "deviceId": "device-1", "deviceName": "iPhone"})
 
-        # The prompt appears without anyone asking for it.
-        assert await _settled(pilot, lambda: isinstance(app.screen, PairingPrompt))
+        request = await _await_event(events, "pairing.requested")
+        assert request["deviceId"] == "device-1"
+        assert request["deviceName"] == "iPhone"
 
-        await pilot.press("enter")
-
-        ack = await asyncio.wait_for(phone.next(), 5)
-        assert ack == {"type": "helloAck", "status": "approved"}
-        assert live.pairing.is_approved("iphone-1")
-        await phone.close()
-
-
-async def test_escape_denies_and_the_phone_is_told(live):
-    app = BigBroApp(socket_path=live.socket_path)
-    async with app.run_test() as pilot:
-        await _settled(pilot, lambda: live.events.subscriber_count == 1)
-
-        phone = await PhoneClient.connect(live.tcp_port)
-        await phone.send({
-            "type": "hello", "deviceId": "iphone-2", "deviceName": "iPhone",
-            "appName": "MyApp", "requiredModels": [],
-        })
-        assert await _settled(pilot, lambda: isinstance(app.screen, PairingPrompt))
-
-        await pilot.press("escape")
-
-        ack = await asyncio.wait_for(phone.next(), 5)
-        assert ack == {"type": "helloAck", "status": "denied"}
-        assert not live.pairing.is_approved("iphone-2")
-        await phone.close()
-
-
-async def test_a_known_device_reconnects_with_no_prompt(live):
-    """Approval is once per device — a reconnect must not interrupt anyone."""
-    live.pairing.approve("known-phone", "iPhone", "MyApp", [])
-
-    app = BigBroApp(socket_path=live.socket_path)
-    async with app.run_test() as pilot:
-        await _settled(pilot, lambda: live.events.subscriber_count == 1)
-
-        phone = await PhoneClient.connect(live.tcp_port)
-        await phone.send({
-            "type": "hello", "deviceId": "known-phone", "deviceName": "iPhone",
-            "appName": "MyApp", "requiredModels": [],
-        })
-
-        ack = await asyncio.wait_for(phone.next(), 5)
-        assert ack["status"] == "approved"
-        assert not isinstance(app.screen, PairingPrompt)
-        await phone.close()
-
-
-async def test_the_devices_pane_follows_a_connection(live):
-    from textual.widgets import DataTable
-
-    app = BigBroApp(socket_path=live.socket_path)
-    async with app.run_test() as pilot:
-        await _settled(pilot, lambda: live.events.subscriber_count == 1)
-
-        phone = await PhoneClient.connect(live.tcp_port)
-        await phone.send({
-            "type": "hello", "deviceId": "iphone-3", "deviceName": "iPhone",
-            "appName": "MyApp", "requiredModels": [],
-        })
-        await _settled(pilot, lambda: isinstance(app.screen, PairingPrompt))
-        await pilot.press("enter")
-        await asyncio.wait_for(phone.next(), 5)
-
-        table = app.query_one("#devices-table", DataTable)
-        assert await _settled(pilot, lambda: table.row_count == 1)
-        assert await _settled(pilot, lambda: len(live.server.connected_device_ids) == 1)
-
-        await phone.close()
-        assert await _settled(pilot, lambda: len(live.server.connected_device_ids) == 0)
-
-
-async def test_settings_written_from_the_dashboard_persist(live, tmp_path):
-    from bigbro.config import JSONStore, Settings
-    from textual.widgets import Input
-
-    app = BigBroApp(socket_path=live.socket_path)
-    async with app.run_test() as pilot:
-        assert await _settled(
-            pilot, lambda: app.query_one("#set-log-level", Input).value == "INFO"
+        reply = await send_command(
+            {"command": "pair.approve", "deviceId": "device-1"}, live.socket_path
         )
+        assert reply["ok"] is True
 
-        app.query_one("TabbedContent").active = "settings"
-        await pilot.pause()
-        field = app.query_one("#set-log-level", Input)
-        field.focus()
-        field.value = "DEBUG"
-        await pilot.press("enter")
+        ack = await phone.next()
+        assert ack["type"] == "helloAck"
+        await phone.close()
 
-        assert await _settled(pilot, lambda: live.settings.log_level == "DEBUG")
 
-    # And it survives a restart, which is the point of a config file.
-    assert Settings.load(JSONStore(tmp_path / "config.json")).log_level == "DEBUG"
+async def test_denial_is_delivered_to_the_phone_rather_than_leaving_it_waiting(live):
+    async with subscribe(live.socket_path) as events:
+        await asyncio.sleep(0.05)
+
+        phone = await PhoneClient.connect(live.tcp_port)
+        await phone.send({"type": "hello", "deviceId": "device-2", "deviceName": "iPad"})
+        await _await_event(events, "pairing.requested")
+
+        reply = await send_command(
+            {"command": "pair.deny", "deviceId": "device-2"}, live.socket_path
+        )
+        assert reply["ok"] is True
+
+        # A denied phone is told in the same message an approved one gets, with a
+        # different status. Silence, or a bare disconnect, would leave it retrying
+        # against a Mac that has already decided.
+        assert await phone.next() == {"type": "helloAck", "status": "denied"}
+        assert not live.pairing.is_approved("device-2")
+        await phone.close()
+
+
+async def test_a_known_device_reconnects_without_asking_again(live):
+    """The point of remembering a device: no second prompt, ever."""
+    live.pairing.approve("device-3", "iPhone", "TestApp", [])
+
+    async with subscribe(live.socket_path) as events:
+        await asyncio.sleep(0.05)
+
+        phone = await PhoneClient.connect(live.tcp_port)
+        await phone.send({"type": "hello", "deviceId": "device-3", "deviceName": "iPhone"})
+
+        ack = await phone.next()
+        assert ack["type"] == "helloAck"
+        assert await _no_event(events, "pairing.requested")
+        await phone.close()
+
+
+async def test_a_connection_is_announced_and_shows_up_in_status(live):
+    async with subscribe(live.socket_path) as events:
+        await asyncio.sleep(0.05)
+        live.pairing.approve("device-4", "iPhone", "TestApp", [])
+
+        phone = await PhoneClient.connect(live.tcp_port)
+        await phone.send({"type": "hello", "deviceId": "device-4", "deviceName": "iPhone"})
+        await phone.next()
+
+        connected = await _await_event(events, "peer.connected")
+        assert connected["deviceId"] == "device-4"
+
+        status = await send_command({"command": "status"}, live.socket_path)
+        assert "device-4" in status["connected"]
+        await phone.close()
+
+
+async def test_a_setting_written_over_the_socket_reaches_disk(live, tmp_path):
+    """What the Settings pane does, minus the pane."""
+    reply = await send_command(
+        {"command": "settings.set", "key": "port", "value": 9100}, live.socket_path
+    )
+    assert reply["ok"] is True
+    assert reply["settings"]["port"] == 9100
+
+    import json
+
+    saved = json.loads((tmp_path / "config.json").read_text())
+    assert saved["port"] == 9100
+
+
+async def test_a_rejected_setting_changes_nothing(live, tmp_path):
+    reply = await send_command(
+        {"command": "settings.set", "key": "port", "value": 80}, live.socket_path
+    )
+    assert reply["ok"] is False
+    assert "between 1024 and 65535" in reply["error"]

@@ -121,9 +121,10 @@ def hub_repository_root(directory: Path) -> Path | None:
 class _DevNull:
     """Where the Hub's progress bars are pointed.
 
-    stdout belongs to the dashboard, and under `--no-ui` a redrawing bar would
-    interleave with the log stream. `isatty()` is False so tqdm picks its
-    non-interactive path and does not emit control sequences either.
+    A redrawing bar would interleave with the log stream, and progress already
+    goes to anything watching as `download.progress` events. `isatty()` is False
+    so tqdm picks its non-interactive path and does not emit control sequences
+    either.
     """
 
     def write(self, *_args) -> int:
