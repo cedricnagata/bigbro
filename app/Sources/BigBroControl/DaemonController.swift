@@ -80,6 +80,14 @@ public final class DaemonController {
     private let socketPath: String
     private let client: ControlClient
     private var process: Process?
+
+    /// Which run a termination handler belongs to.
+    ///
+    /// The handler fires off-actor and cannot carry the `Process` back with it —
+    /// `Process` is not Sendable — so identity is a counter instead. It also
+    /// distinguishes a crash from a shutdown we asked for: `stop()` bumps this,
+    /// so the SIGTERM it sends does not come back as a failure alert.
+    private var run = 0
     private let stderr = StderrTail()
 
     public init(client: ControlClient) {
@@ -163,8 +171,12 @@ public final class DaemonController {
             _ = handle.availableData
         }
 
+        run += 1
+        let thisRun = run
         task.terminationHandler = { [weak self] finished in
-            Task { @MainActor in self?.daemonExited(finished) }
+            guard let self else { return }
+            let status = finished.terminationStatus
+            Task { @MainActor in self.daemonExited(run: thisRun, status: status) }
         }
 
         do {
@@ -185,13 +197,14 @@ public final class DaemonController {
     /// Reporting only "cannot find a control socket" would describe the symptom
     /// and hide the cause, so the exit status and the tail of stderr — where the
     /// port conflict or the import error actually is — go into the message.
-    private func daemonExited(_ finished: Process) {
-        guard process === finished else { return }
+    private func daemonExited(run finished: Int, status: Int32) {
+        // A handler from a daemon we already replaced, or one we stopped on purpose.
+        guard finished == run else { return }
         process = nil
         mode = .stopped
 
         failure = stderr.lastLine.map { "The daemon stopped: \($0)" }
-            ?? "The daemon stopped unexpectedly (exit code \(finished.terminationStatus))."
+            ?? "The daemon stopped unexpectedly (exit code \(status))."
     }
 
     /// Stops an owned daemon. An attached one is left alone.
@@ -201,6 +214,9 @@ public final class DaemonController {
             return
         }
         process = nil
+        // Past this point the termination handler is a stale run, so the exit it
+        // reports is not a failure anyone needs telling about.
+        run += 1
         // SIGTERM, which `Daemon._install_signal_handlers` turns into a clean
         // shutdown: `bye` to every peer, Bonjour down, socket unlinked, wake lock
         // released.

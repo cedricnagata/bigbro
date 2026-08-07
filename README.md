@@ -1,6 +1,6 @@
 # BigBro
 
-A macOS terminal daemon that turns your Mac into a local AI inference server for nearby iOS devices.
+A macOS app that turns your Mac into a local AI inference server for nearby iOS devices.
 
 BigBro advertises itself on the local network via Bonjour, accepts pairing requests from iOS apps
 with explicit per-device approval, and runs inference **in-process** via
@@ -26,26 +26,47 @@ run separately. Your Mac downloads the models itself, on first use or from the C
 
 ## Installation
 
-BigBro installs straight from the repository with [uv](https://docs.astral.sh/uv/) — there is
-nothing to clone and nothing to build:
+Download the latest `BigBro-<version>-arm64.dmg` from
+[Releases](https://github.com/cedricnagata/bigbro/releases), open it, and drag BigBro to
+Applications. That is the whole thing — there is no Python to install, no `uv`, no terminal.
+
+The download is around 600 MB and expands to roughly 1.3 GB, because the app carries its own
+interpreter and its own copy of the MLX stack. Model weights are *not* included; BigBro downloads
+those on first use, into the usual `~/.cache/huggingface`.
+
+**On first launch macOS will ask for Local Network access. Say yes.** BigBro advertises itself over
+Bonjour so nearby iPhones can find your Mac, and that is exactly what the prompt governs. If you
+decline, the app runs and the daemon serves, but no iOS device will ever discover it — and nothing
+in the log will explain why. You can change your mind in System Settings › Privacy & Security ›
+Local Network.
+
+### Just the CLI
+
+If you only want `bigbro` in a terminal — a headless Mac mini, CI, a machine you never sit at —
+install it with [uv](https://docs.astral.sh/uv/) instead:
 
 ```sh
 uv tool install git+https://github.com/cedricnagata/bigbro
 ```
 
-That puts `bigbro` on your PATH with its own interpreter and its own copy of the MLX stack, so
-nothing else on your machine is touched. Pin a release with `@v1.0.0`, or track the tip by
-re-running the same command with `--force`.
+That puts `bigbro` on your PATH with its own interpreter and its own copy of the MLX stack. Pin a
+release with `@v1.0.0`, or track the tip by re-running with `--force`. Expect around 1.4 GB.
 
-Expect the first install to take a while and land around 1.4 GB: the MLX stack, `transformers`
-and spaCy are all pulled in, and none of them are small.
+If you installed the app, you do not need this: BigBro can install the same `bigbro` command into
+`~/.local/bin` for you, pointing at the interpreter it already carries. Settings › Command line.
 
-> **BigBro is not on an index, and the install above is the supported one.** The name on PyPI
-> belongs to an unrelated project, so `pip install bigbro` gets you someone else's package and no
-> `bigbro` command. Building a wheel from this repo and installing *that* also fails — Kokoro's
-> phonemizer needs a spaCy model, spaCy models are not published to PyPI, and the URL that
-> resolves it lives in `[tool.uv.sources]`, which uv reads from the project rather than carrying
-> into a built artifact. Installing from git keeps that table in play, which is why it works.
+> **BigBro is not on an index, and the two installs above are the supported ones.** The name on
+> PyPI belongs to an unrelated project, so `pip install bigbro` gets you someone else's package and
+> no `bigbro` command. Building a wheel from this repo and installing *that* also fails — Kokoro's
+> phonemizer needs a spaCy model, spaCy models are not published to PyPI, and the URL that resolves
+> it lives in `[tool.uv.sources]`, which uv reads from the project rather than carrying into a
+> built artifact. Installing from git keeps that table in play, which is why it works — and it is
+> also why the DMG is built by syncing the project rather than by building a wheel.
+
+> **Python 3.14 does not work yet on macOS.** spaCy publishes no `cp314` wheels, and it is pulled
+> in through `mlx-audio` → `misaki`, so `uv tool install` against a 3.14 interpreter fails while
+> resolving. Use 3.12 or 3.13 (`uv tool install --python 3.12 …`). The app is unaffected — it
+> carries 3.12 inside it.
 
 ### Working on it
 
@@ -70,89 +91,39 @@ Use a venv if you go that way; see [Development](#development).
 
 ## Usage
 
+Open BigBro. The menu bar item is the day-to-day face of it: serving state at a glance, which
+models are loaded, and Approve/Deny right there when a phone asks to pair — no window to go
+hunting for. The window has the detail.
+
+The app starts the daemon itself and stops it when you quit. If a daemon is *already* running —
+you started one in a terminal, or put one behind launchd — BigBro attaches to that one instead and
+leaves it running when you quit. There is only ever one daemon and one control socket, so the app
+and the CLI are always talking about the same thing.
+
+### From a terminal
+
 ```sh
-bigbro serve                    # run the daemon with the dashboard
+bigbro serve                    # run the daemon
 bigbro serve --port 9000        # listen somewhere else
 bigbro serve --no-keep-awake    # let the Mac sleep normally while serving
-bigbro serve --no-ui            # plain logs instead of the dashboard
 ```
 
-On a terminal this opens the dashboard; piped or under launchd it falls back to plain logs
-automatically, so the same command works in both places.
+Leave it running, or put it behind launchd. Every other command talks to the running daemon over a
+Unix socket, so they work from any shell — including when the daemon has no terminal at all, and
+including against a daemon BigBro.app started.
 
-Leave it running in a terminal, or put it behind launchd. Every other command talks to the running
-daemon over a Unix socket, so they work from any shell — including when the daemon has no terminal
-at all.
-
-### The dashboard
-
-```sh
-bigbro ui                       # attach to a daemon started elsewhere
-```
-
-`serve` renders it inline; `ui` attaches to a daemon already running (under launchd, in another
-window, over SSH). Quitting an attached dashboard leaves the daemon serving — only the one inside
-`serve` stops it.
+### The window
 
 | Pane | What it does |
 |---|---|
-| **Devices** | Paired devices, each showing `● connected` / `○ offline` and updating as they come and go, plus anything awaiting approval |
-| **Text** / **Vision** / **TTS** / **STT** | One pane per model family, each listing real model names with capabilities, lifecycle state, live download progress and memory held. `d`/`s`/`x`/`delete` are the same four verbs as the CLI |
-| **Settings** | Port, keep-awake and log level, persisted to `config.json` |
-| **Log** | The daemon's log, including when attached over the control socket |
+| **Devices** | Paired devices, each showing connected/offline and updating as they come and go, plus anything awaiting approval |
+| **Text** / **Vision** / **TTS** / **STT** | One pane per model family, each listing real model names with capabilities, lifecycle state, a live download progress bar and memory held |
+| **Settings** | Port, keep-awake and log level, written straight through to the daemon. Also installs the `bigbro` command line tool |
+| **Log** | The daemon's log, streamed over the control socket — so it works against a daemon started anywhere, including under launchd |
 
-Models are split by family rather than pooled into one list because they are not
-interchangeable: a language model has no vision tower, and a speech model answers nothing at all.
-Naming the wrong kind is an error rather than a degraded answer, so they are never offered as one
-list. A pane *is* a family — which is what lets the TTS pane show **Kokoro** while `tts` stays the
-name the wire protocol uses.
-
-The status bar carries the daemon's memory footprint and its share of installed RAM, and the
-Models pane shows what each resident model is actually costing.
-
-`q` quit · `r` refresh · `d` download · `s` start · `x` stop · `delete` delete the selected model
-or forget the selected device · `enter` approve a pairing request · `esc` deny it.
-
-Move between panes with `←`/`→` or `1`–`7`; move the selection within a pane with `↑`/`↓`. The
-pane's table takes focus when it opens, so the arrow keys work straight away.
-
-The Settings pane focuses the pane itself rather than a text field, so `←`/`→` still change pane
-from there. Press `tab` to move into a field to edit it — inside a field `←`/`→` edit the text as
-usual — and `esc` to step back out.
-
-**Pairing happens here.** When an unknown device connects, a prompt appears on its own — Enter
-approves, Escape denies. No second shell, no `bigbro pair approve`. The CLI commands still work
-and are still what you want under launchd; the dashboard is a client of exactly the same control
-socket, so the two never disagree.
-
-The daemon is deliberately not owned by the dashboard. A UI crash, a closed window or a dropped
-SSH session leaves inference running.
-
-```sh
-bigbro status                   # what the daemon is doing right now
-
-bigbro pair list                # paired devices, and anything awaiting approval
-bigbro pair approve <id>        # approve a pending request (any unambiguous id prefix works)
-bigbro pair deny <id>
-bigbro pair disconnect <id>     # close a connection without forgetting the device
-bigbro pair remove <id>         # forget a device entirely; it must re-pair with approval
-bigbro pair remove-all
-
-bigbro models list              # catalog, capabilities and lifecycle state
-bigbro models download <id>     # fetch the weights to disk
-bigbro models delete <id>       # remove the weights from disk
-bigbro models start <id>        # load into memory, ready to answer
-bigbro models stop <id>         # unload from memory, keep the download
-bigbro models check             # verify every catalog repo id resolves on Hugging Face
-```
-
-Four verbs, two axes: **download / delete** are about disk, **start / stop** are about memory. A
-12 GB model sitting downloaded costs nothing until you start it. `start` downloads first if the
-weights aren't there, and a request for a model that isn't running starts it anyway — the verbs
-just let you pay those costs when you choose to.
-
-Speech models answer to their own names (`kokoro`, `parakeet`) and to the role they fill
-(`tts`, `stt`, or `speech` for both) — so whatever the panes display can also be typed.
+Everything the window does, it does by sending the same control-socket commands the CLI sends.
+Neither one can quietly diverge from the other, and ordering and wording come from the daemon
+rather than being reproduced in two places.
 
 ### Downloads
 
@@ -212,15 +183,14 @@ clamshell sleep and overrides the assertion. Display sleep is always allowed. Pa
 ### Pairing
 
 An unknown device's `hello` **parks**: the connection is held open, unregistered, while the daemon
-waits for a decision. With the dashboard up that decision is a prompt and a keypress. Headless, the
-daemon logs
+waits for a decision. With BigBro.app running that decision is a prompt and a click — from the menu
+bar, so it reaches you even when nothing is focused. Headless, the daemon logs
 
 ```
 WARNING  bigbro.pairing   'Cedric's iPhone' (MyApp) wants to pair — approve in the dashboard, or run: bigbro pair approve a1b2c3d4
 ```
 
-and either `bigbro pair approve` from another shell or an attached `bigbro ui` completes the
-handshake. A parked request is denied and closed after 5 minutes so an ignored one cannot hold a
+and `bigbro pair approve` from any shell completes the handshake. A parked request is denied and closed after 5 minutes so an ignored one cannot hold a
 socket open forever — the device can always reconnect and ask again.
 
 Approval travels over a Unix socket at `~/Library/Application Support/bigbro/control.sock`, mode
@@ -499,7 +469,7 @@ Everything lives in `~/Library/Application Support/bigbro/` (override with `BIGB
 | `devices.json` | Approved device ids, names and app names |
 | `downloads.json` | Catalog id → the directory its weights landed in |
 | `config.json` | Port, keep-awake and log level. CLI flags override it |
-| `control.sock` | The Unix socket the CLI and dashboard talk to, mode `0600` |
+| `control.sock` | The Unix socket the CLI and BigBro.app talk to, mode `0600` |
 
 Model weights themselves live in the standard Hugging Face cache (`~/.cache/huggingface/hub`).
 
@@ -511,8 +481,7 @@ src/bigbro/
 ├── daemon.py               — wiring, lifecycle, control-command handlers
 ├── router.py               — message dispatch, capability negotiation, wire forwarding
 ├── control.py              — Unix control socket: commands + the event stream
-├── events.py               — event fan-out to attached dashboards
-├── tui.py                  — the Textual dashboard (a control-socket client)
+├── events.py               — event fan-out to attached clients
 ├── config.py               — support directory, atomic JSON store
 ├── speech.py               — Kokoro TTS + Parakeet STT via mlx-audio
 ├── macos/
