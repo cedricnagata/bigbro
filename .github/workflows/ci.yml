@@ -36,10 +36,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pinned, and not incidentally. The macOS runners default to CPython 3.14,
+      # and on Apple silicon the platform markers pull in the whole MLX chain —
+      # including spaCy, which publishes wheels only up to cp313. An unpinned run
+      # fails at install with a resolver error and never reaches a test. 3.12 is
+      # also the version the bundled runtime will ship, so CI exercises what
+      # users will actually run.
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          python-version: "3.12"
 
       # `--frozen` so CI resolves exactly what uv.lock pins. A run that quietly
       # re-resolved would be testing something nobody is going to install.
@@ -63,10 +70,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pinned, and not incidentally. The macOS runners default to CPython 3.14,
+      # and on Apple silicon the platform markers pull in the whole MLX chain —
+      # including spaCy, which publishes wheels only up to cp313. An unpinned run
+      # fails at install with a resolver error and never reaches a test. 3.12 is
+      # also the version the bundled runtime will ship, so CI exercises what
+      # users will actually run.
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          python-version: "3.12"
 
       # PythonServerTests drives the Swift client against the real ControlServer,
       # so the venv is a test dependency here, not incidental. Without it those
