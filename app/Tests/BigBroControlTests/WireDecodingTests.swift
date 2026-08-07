@@ -76,6 +76,39 @@ final class WireDecodingTests: XCTestCase {
         XCTAssertEqual(status.memory.summary, "?")
     }
 
+    /// A daemon that predates the memory probe sends no `memory` key at all, and
+    /// an absent report says exactly what a present one full of nulls says.
+    ///
+    /// Found by `PythonServerTests` rather than by anything here: `memory` was
+    /// required, and the stub server — standing in for that older daemon — omits
+    /// it, so the whole `status` decode threw. A stub written on this side would
+    /// have been written to match the decoder and never caught it.
+    func testAStatusWithoutMemoryStillDecodes() throws {
+        let reply = """
+            {"ok": true, "name": "Test Mac", "port": 8765, "keepAwake": true, "paired": 1,
+             "connected": ["d1"], "pending": [], "running": [], "downloaded": [],
+             "speech": {"tts": "not downloaded", "stt": "not downloaded"}}
+            """
+
+        let status = try Reply.decode(Status.self, from: Data(reply.utf8))
+
+        XCTAssertEqual(status.name, "Test Mac")
+        XCTAssertNil(status.memory.headline)
+        XCTAssertEqual(status.memory.summary, "?")
+    }
+
+    /// The other side of that trade: a core key going missing is still loud.
+    func testAStatusMissingACoreKeyFailsRatherThanDefaulting() {
+        let reply = """
+            {"ok": true, "name": "Test Mac", "paired": 0, "keepAwake": true,
+             "connected": [], "pending": [], "running": [], "downloaded": [], "speech": {}}
+            """
+
+        // No `port`. Defaulting it to 0 would leave the UI quietly claiming the
+        // daemon listens somewhere it does not.
+        XCTAssertThrowsError(try Reply.decode(Status.self, from: Data(reply.utf8)))
+    }
+
     func testAFailedReplyThrowsTheDaemonsOwnWords() {
         let refusal = #"{"ok": false, "error": "port must be between 1024 and 65535, got 80"}"#
 

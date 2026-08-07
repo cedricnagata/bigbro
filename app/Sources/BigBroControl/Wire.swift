@@ -50,6 +50,31 @@ public struct Status: Decodable, Sendable, Equatable {
     public let downloaded: [String]
     public let speech: [String: SpeechInfo]
     public let memory: MemoryReport
+
+    private enum CodingKeys: String, CodingKey {
+        case name, port, keepAwake, paired, connected, pending, running, downloaded, speech, memory
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        port = try container.decode(Int.self, forKey: .port)
+        keepAwake = try container.decode(Bool.self, forKey: .keepAwake)
+        paired = try container.decode(Int.self, forKey: .paired)
+        connected = try container.decode([String].self, forKey: .connected)
+        pending = try container.decode([PendingRequest].self, forKey: .pending)
+        running = try container.decode([String].self, forKey: .running)
+        downloaded = try container.decode([String].self, forKey: .downloaded)
+        speech = try container.decode([String: SpeechInfo].self, forKey: .speech)
+
+        // The one tolerated absence. A daemon that predates the memory probe sends
+        // no `memory` at all, and an absent report says exactly what a present one
+        // full of nulls says — every figure is unknown. Everything above stays
+        // required on purpose: those are core, the daemon always sends them, and a
+        // silent default would turn a rename into an empty pane rather than a loud
+        // failure. `tests/test_control_contract.py` is what guards the renames.
+        memory = try container.decodeIfPresent(MemoryReport.self, forKey: .memory) ?? MemoryReport()
+    }
 }
 
 /// What a speech role is doing.
@@ -104,6 +129,23 @@ public struct MemoryReport: Decodable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case resident, peak, footprint, total, pressure, mlx, models, headline, weights
+    }
+
+    /// An entirely unknown report — what a daemon with no memory probe amounts to.
+    public init(
+        resident: Int? = nil, peak: Int? = nil, footprint: Int? = nil, total: Int? = nil,
+        pressure: String? = nil, mlx: [String: Int] = [:], models: [String: Int] = [:],
+        headline: Int? = nil, weights: Int? = nil
+    ) {
+        self.resident = resident
+        self.peak = peak
+        self.footprint = footprint
+        self.total = total
+        self.pressure = pressure
+        self.mlx = mlx
+        self.models = models
+        self.headline = headline
+        self.weights = weights
     }
 
     public init(from decoder: Decoder) throws {
