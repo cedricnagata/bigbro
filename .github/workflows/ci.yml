@@ -39,3 +39,31 @@ jobs:
 
       - name: Test
         run: uv run pytest -q
+
+  swift:
+    name: swift test
+    # arm64, and the oldest macOS image GitHub offers — which is also the floor
+    # the app targets and the one the mlx wheels will be selected against when
+    # the runtime gets bundled.
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # PythonServerTests drives the Swift client against the real ControlServer,
+      # so the venv is a test dependency here, not incidental. Without it those
+      # tests skip and the cross-language check silently stops running.
+      - name: Install Python side
+        run: uv sync --frozen --extra dev
+
+      - name: Build
+        run: swift build --package-path app
+
+      - name: Test
+        run: swift test --package-path app
