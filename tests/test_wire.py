@@ -592,3 +592,56 @@ async def test_text_with_something_in_it_is_still_spoken(harness):
     received = await client.collect_until("done")
     assert [m["type"] for m in received] == ["audioStart", "audioChunk", "audioChunk", "done"]
     await client.close()
+
+
+# MARK: - Announcing what a phone changed
+
+
+async def test_a_run_from_a_phone_announces_the_model_state(harness):
+    """The bug this covers: a model started from an iPhone was invisible.
+
+    Only the daemon's control handlers announced model state, so a `run` over the
+    peer protocol loaded the model, logged that it was running, and left every
+    attached UI showing whatever the row said before — until something else
+    forced a re-read.
+    """
+    announced: list[str] = []
+    harness.router.on_model_change = announced.append
+
+    client = await approved_client(harness)
+    await client.send({"type": "run", "requestId": "r90", "model": "llama-3.2-1b"})
+    assert (await client.next())["type"] == "done"
+
+    assert "llama-3.2-1b" in announced
+    await client.close()
+
+
+async def test_a_stop_from_a_phone_announces_the_model_state(harness):
+    announced: list[str] = []
+    harness.router.on_model_change = announced.append
+
+    client = await approved_client(harness)
+    await client.send({"type": "stop", "requestId": "r91", "model": "llama-3.2-1b"})
+    assert (await client.next())["type"] == "done"
+
+    assert "llama-3.2-1b" in announced
+    await client.close()
+
+
+async def test_a_failed_run_is_announced_too(harness):
+    """A row that stays on its old state after a failure is worse than one that
+    shows the error — the user is left waiting for something already given up on."""
+    announced: list[str] = []
+    harness.router.on_model_change = announced.append
+
+    async def explode(_entry):
+        raise RuntimeError("out of memory")
+
+    harness.engine.run = explode
+
+    client = await approved_client(harness)
+    await client.send({"type": "run", "requestId": "r92", "model": "llama-3.2-1b"})
+    assert (await client.next())["type"] == "error"
+
+    assert "llama-3.2-1b" in announced
+    await client.close()

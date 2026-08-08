@@ -17,7 +17,7 @@ import logging
 import queue
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 from . import mlx_thread
 from .catalog import BigBroModel, Family, ReasoningStyle, resolve
@@ -94,6 +94,15 @@ class ResolvedRequest:
 class MLXEngine:
     def __init__(self, downloader: ModelDownloader | None = None) -> None:
         self.downloader = downloader or ModelDownloader()
+        #: Set by the daemon: called with a catalog id whenever a model finishes
+        #: loading, fails to load, or is unloaded.
+        #:
+        #: Here rather than in the callers because there are three of them — a
+        #: control command, a peer's `run`, and the lazy load a plain inference
+        #: request triggers — and only the third is easy to forget. A model an
+        #: iPhone loaded by asking it a question would otherwise read as
+        #: `downloaded` in every attached UI while the log said it was running.
+        self.on_state_change: Callable[[str], None] = lambda _model_id: None
         self._loaded: dict[str, Any] = {}                       # id → (model, processor)
         self._load_tasks: dict[str, asyncio.Task] = {}
         self._errors: dict[str, str] = {}
@@ -157,6 +166,14 @@ class MLXEngine:
 
         task = asyncio.create_task(self._load(model))
         self._load_tasks[model.id] = task
+        # Registering the task *is* the transition to "starting" — `state()` reads
+        # it straight off `_load_tasks`. Announced here for the same reason the
+        # finish is announced from `_load`: three routes load a model, and an
+        # announcement left to the callers is one a fourth caller will forget.
+        # Without it a load begun by a phone is invisible until it completes, so
+        # the row sits on "downloaded" through the slowest part and then blinks to
+        # "running" — and for a 12 GB model that is minutes of saying nothing.
+        self.on_state_change(model.id)
         try:
             return await task
         finally:
@@ -181,10 +198,12 @@ class MLXEngine:
         except Exception as exc:
             self._errors[model.id] = str(exc)
             log.error("failed to load %s: %s", model.id, exc)
+            self.on_state_change(model.id)
             raise
 
         self._loaded[model.id] = loaded
         self._errors.pop(model.id, None)
+        self.on_state_change(model.id)
         log.info(
             "%s is running%s",
             model.display_name,
@@ -209,13 +228,51 @@ class MLXEngine:
         loaded = cls._load_blocking(model)
         return loaded, mlx_thread.active_memory() - before
 
+    #: Harmony's tool-call terminator. A model that has decided to call a tool ends
+    #: the turn with this instead of `<|return|>`.
+    _HARMONY_CALL_TOKEN = "<|call|>"
+
     @staticmethod
     def _load_blocking(model: BigBroModel):
         if model.family is Family.VISION:
             from mlx_vlm import load as vlm_load
             return vlm_load(model.repo)
         from mlx_lm import load as lm_load
-        return lm_load(model.repo)
+        loaded = lm_load(model.repo)
+        MLXEngine._teach_harmony_stop_tokens(model, loaded)
+        return loaded
+
+    @classmethod
+    def _teach_harmony_stop_tokens(cls, model: BigBroModel, loaded) -> None:
+        """Stops a harmony model when it calls a tool, not just when it answers.
+
+        mlx-lm takes its stop tokens from `config.json`, and gpt-oss declares only
+        `eos_token_id: 200002` — `<|return|>`, which ends a turn that produced an
+        *answer*. A turn that produced a tool call ends with `<|call|>` (200012)
+        instead, and nothing tells the sampler that.
+
+        Generation therefore runs straight past the call. The model, having emitted
+        a call and seen no result, writes a plausible-looking result itself, then
+        another call, then another invented result — until it hits mlx-lm's default
+        of 256 tokens. It never reaches a final channel, so the turn yields no
+        answer at all, and the client is handed a pile of duplicate calls whose
+        results it never asked for. What looks like a model failing to stop calling
+        one tool is really a decoder that was never told the turn was over.
+
+        Only for harmony models: `<|call|>` is that template's token, and other
+        families either have no such marker or spell it differently.
+        """
+        if model.reasoning is not ReasoningStyle.HARMONY:
+            return
+        tokenizer = loaded[1] if isinstance(loaded, tuple) and len(loaded) > 1 else None
+        if tokenizer is None or not hasattr(tokenizer, "add_eos_token"):
+            return
+        try:
+            tokenizer.add_eos_token(cls._HARMONY_CALL_TOKEN)
+        except Exception as exc:
+            # A tokenizer without the token is a model that does not need it; the
+            # turn still ends on `<|return|>`. Worth a line, not a failed load.
+            log.warning("could not add %s as a stop token: %s", cls._HARMONY_CALL_TOKEN, exc)
 
     def stop(self, model_id: str) -> None:
         """Unloads a model from memory, keeping the download.
@@ -227,6 +284,7 @@ class MLXEngine:
             return
         self._errors.pop(model_id, None)
         self._memory.pop(model_id, None)
+        self.on_state_change(model_id)
         log.info("stopped %s", model_id)
         # Reclaim what the model was holding. MLX caches buffers between requests,
         # and those survive the model object going away unless the cache is

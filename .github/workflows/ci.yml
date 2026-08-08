@@ -1,0 +1,113 @@
+name: CI
+
+# Every branch, not just main. Work here happens on branches for a while before
+# it becomes a pull request, and a check that only runs at the end is a check
+# that finds things at the worst possible moment.
+#
+# `pull_request` is kept for forks, which do not raise `push` on this repository —
+# and skipped for branches that do, so a same-repo PR is not built twice.
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (${{ matrix.os }})
+    if: >
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS is where bigbro runs, so it is the one that matters. Linux is kept
+        # because the platform markers in pyproject.toml deliberately keep the
+        # parsers, catalog, framing and pairing installable off macOS, and a break
+        # in that is easy to miss until someone tries to work on it from a laptop
+        # that is not a Mac.
+        os: [macos-14, ubuntu-latest]
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned, and not incidentally. The macOS runners default to CPython 3.14,
+      # and on Apple silicon the platform markers pull in the whole MLX chain —
+      # including spaCy, which publishes wheels only up to cp313. An unpinned run
+      # fails at install with a resolver error and never reaches a test. 3.12 is
+      # also the version the bundled runtime will ship, so CI exercises what
+      # users will actually run.
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          python-version: "3.12"
+
+      # `--frozen` so CI resolves exactly what uv.lock pins. A run that quietly
+      # re-resolved would be testing something nobody is going to install.
+      - name: Install
+        run: uv sync --frozen --extra dev
+
+      - name: Test
+        run: uv run pytest -q
+
+  swift:
+    name: swift test
+    if: >
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    # arm64, and the oldest macOS image GitHub offers — which is also the floor
+    # the app targets and the one the mlx wheels will be selected against when
+    # the runtime gets bundled.
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned, and not incidentally. The macOS runners default to CPython 3.14,
+      # and on Apple silicon the platform markers pull in the whole MLX chain —
+      # including spaCy, which publishes wheels only up to cp313. An unpinned run
+      # fails at install with a resolver error and never reaches a test. 3.12 is
+      # also the version the bundled runtime will ship, so CI exercises what
+      # users will actually run.
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          python-version: "3.12"
+
+      # PythonServerTests drives the Swift client against the real ControlServer,
+      # so the venv is a test dependency here, not incidental. Without it those
+      # tests skip and the cross-language check silently stops running.
+      - name: Install Python side
+        run: uv sync --frozen --extra dev
+
+      - name: Build
+        run: swift build --package-path app
+
+      - name: Test
+        run: swift test --package-path app
+
+      # Assembles the bundle without a Python runtime inside it. Cheap, and it
+      # catches the things that only break at assembly time — a bad Info.plist,
+      # a PlistBuddy key that moved, a binary SwiftPM put somewhere else.
+      - name: Assemble an unsigned app
+        run: |
+          swift build --package-path app -c release --arch arm64
+          app/Scripts/make-app.sh \
+            "$(swift build --package-path app -c release --arch arm64 --show-bin-path)" \
+            build 0.0.0-ci
+          test -x build/BigBro.app/Contents/MacOS/BigBroApp
+          plutil -lint build/BigBro.app/Contents/Info.plist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BigBro-unsigned
+          path: build/BigBro.app
+          retention-days: 7

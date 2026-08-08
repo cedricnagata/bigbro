@@ -67,9 +67,9 @@ class EventBus:
 class LogEventHandler(logging.Handler):
     """Mirrors daemon log records onto the bus so an attached UI can show them.
 
-    Matters for `bigbro ui`, which attaches to a daemon whose stdout it cannot
-    see — without this the log pane would be empty for exactly the case that
-    needs it most.
+    Matters for BigBro.app, which attaches over the control socket and can no
+    more see this process's stdout than it could a launchd daemon's — without
+    this its log pane would be empty for exactly the case that needs it most.
     """
 
     def __init__(self, bus: EventBus) -> None:

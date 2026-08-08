@@ -15,7 +15,7 @@ import signal
 import sys
 from typing import Any
 
-from .config import DEFAULT_PORT, Settings
+from .config import Settings
 from .control import ControlServer
 from .events import EventBus
 from .inference import catalog
@@ -62,6 +62,11 @@ class Daemon:
         self.pairing.is_model_satisfied = self.engine.is_required_model_satisfied
         self.pairing.publish = self.events.publish
         self.router.on_peer_change = self._on_peer_change
+        self.router.on_model_change = self._publish_model_state
+        self.engine.on_state_change = self._publish_model_state
+        # Speech is a second engine with a second lifecycle, and it needs the hook
+        # for the same reason the first one did.
+        self.speech.on_state_change = self._publish_model_state
         self.downloader.on_progress = self._on_download_progress
 
         self._stopping = asyncio.Event()
@@ -207,6 +212,7 @@ class Daemon:
             "models.remove": self._control_models_delete,
             "settings.get": self._control_settings_get,
             "settings.set": self._control_settings_set,
+            "daemon.shutdown": self._control_shutdown,
         }
         handler = handlers.get(command)
         if handler is None:
@@ -428,6 +434,25 @@ class Daemon:
         return {"ok": True, "model": model.id}
 
     # MARK: - Settings
+
+    async def _control_shutdown(self, _request: dict[str, Any]) -> dict[str, Any]:
+        """Stops the daemon, on purpose, from somewhere else.
+
+        Until now the only ways to stop a daemon were Ctrl-C in whichever terminal
+        started it, or finding its pid. That leaves an orphan — a daemon whose UI
+        crashed, or one started in a terminal window since closed — holding the
+        Mac awake with nothing obvious to stop it. BigBro.app cannot send SIGTERM
+        to a process it did not spawn, but it is already holding this socket.
+
+        The stop is scheduled rather than immediate: `stop()` sets the event
+        `run()` is waiting on, and shutdown closes this very socket. Firing it
+        now would race the reply, and the caller would see the connection drop
+        instead of an acknowledgement.
+        """
+        log.info("shutdown requested over the control socket")
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.1, self.stop)
+        return {"ok": True, "stopping": True}
 
     async def _control_settings_get(self, _request: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True, "settings": self.settings.to_wire(), "editable": list(Settings.EDITABLE)}

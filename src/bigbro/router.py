@@ -17,7 +17,7 @@ from .inference.engine import InferenceError, MLXEngine
 from .inference.parsers import Delta, Reasoning, ToolCall
 from .protocol.pairing import PairingManager
 from .protocol.server import PeerServer
-from .speech import ModelKind, SpeechEngine, SpeechError, kinds_for
+from .speech import ModelKind, SpeechEngine, kinds_for
 
 log = logging.getLogger("bigbro.router")
 
@@ -93,6 +93,15 @@ class AppRouter:
         #: Set by the daemon: called with (device_id, connected) whenever a peer
         #: attaches or drops, so an attached UI can move without polling.
         self.on_peer_change: Callable[[str, bool], None] = lambda _id, _connected: None
+        #: Set by the daemon: called with a catalog id whenever this router has
+        #: moved a model between states.
+        #:
+        #: A phone can start and stop models just as the CLI can, and until this
+        #: existed only the daemon's own control handlers announced that. A model
+        #: an iPhone loaded showed up as `running` in the log and stayed
+        #: `downloaded` in every attached UI until something else forced a
+        #: re-read.
+        self.on_model_change: Callable[[str], None] = lambda _model_id: None
 
     # MARK: - PeerServerDelegate
 
@@ -467,17 +476,22 @@ class AppRouter:
 
         log.info("run requested by %s for %s", device_id[:8], model.display_name)
         if not await self._ensure_model_ready(model, request_id, device_id):
+            self.on_model_change(model.id)
             return
 
         try:
             await self.engine.run(model)
         except Exception as exc:
             log.error("run error for %s: %s", device_id[:8], exc)
+            # Announce the failure too: the row would otherwise sit on whatever
+            # it said before the attempt.
+            self.on_model_change(model.id)
             await self.server.send(
                 {"type": "error", "requestId": request_id, "message": str(exc)}, to=device_id
             )
             return
 
+        self.on_model_change(model.id)
         log.info("run complete for %s: %s", device_id[:8], model.display_name)
         await self.server.send({"type": "done", "requestId": request_id}, to=device_id)
 
@@ -527,6 +541,7 @@ class AppRouter:
             return
 
         self.engine.stop(model.id)
+        self.on_model_change(model.id)
         log.info("stopped %s for %s", model.display_name, device_id[:8])
         await self.server.send({"type": "done", "requestId": request_id}, to=device_id)
 

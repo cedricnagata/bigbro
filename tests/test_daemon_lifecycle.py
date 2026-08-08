@@ -12,6 +12,7 @@ and pinning the Mac awake are not side effects a test run should have.
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 import tempfile
 from pathlib import Path
@@ -154,3 +155,115 @@ def test_defaults_apply_with_no_config_file(tmp_path, monkeypatch):
     daemon = Daemon()
     assert daemon.port == 8765
     assert daemon.keep_awake is True
+
+
+# MARK: - Serving without a dashboard in this process
+
+
+class _FakeDaemon:
+    """Just the two attributes `_serve` touches: an event bus and `run()`."""
+
+    def __init__(self, message: str):
+        from bigbro.events import EventBus
+
+        self.events = EventBus()
+        self._message = message
+
+    async def run(self) -> None:
+        logging.getLogger("bigbro.test-serve").warning(self._message)
+
+
+@pytest.fixture
+def pristine_root_logger():
+    """Restores root's handlers, since `_serve` installs one on it."""
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        yield root
+    finally:
+        for handler in [h for h in root.handlers if h not in before]:
+            root.removeHandler(handler)
+
+
+async def test_serving_without_a_dashboard_still_publishes_log_events(pristine_root_logger):
+    """A client attached over the socket cannot see our stderr, only the bus.
+
+    This was silently broken for `--no-ui`: the handler was installed inside the
+    dashboard path only, so a daemon started with plain logs — or under launchd —
+    published no `log` events at all, and an attached UI's log pane stayed empty
+    for exactly the case that needs it most.
+    """
+    from bigbro.__main__ import _serve
+
+    daemon = _FakeDaemon("port already in use")
+    queue = daemon.events.subscribe()
+
+    await _serve(daemon)
+
+    event = await asyncio.wait_for(queue.get(), 1)
+    assert event["event"] == "log"
+    assert event["level"] == "WARNING"
+    assert event["message"] == "port already in use"
+
+
+async def test_serving_without_a_dashboard_keeps_logs_on_stderr(pristine_root_logger):
+    """Nothing owns stdout here, so the logs someone ran `serve` to watch stay put."""
+    from bigbro.__main__ import _serve
+
+    stream_handler = logging.StreamHandler()
+    pristine_root_logger.addHandler(stream_handler)
+
+    await _serve(_FakeDaemon("still visible"))
+
+    assert stream_handler in pristine_root_logger.handlers
+
+
+# MARK: - Dying with the parent
+
+
+def test_serve_accepts_exit_with_parent():
+    """BigBro.app passes this on every spawn; a parser that rejected it would
+    leave the app unable to start a daemon at all."""
+    from bigbro.__main__ import build_parser
+
+    args = build_parser().parse_args(["serve", "--exit-with-parent"])
+    assert args.exit_with_parent is True
+    assert build_parser().parse_args(["serve"]).exit_with_parent is False
+
+
+async def test_the_orphan_watcher_stops_the_daemon_when_reparented(monkeypatch):
+    """A reparented process is an orphan — the kernel gives it to launchd.
+
+    That is the only signal that survives the force-quit of a parent that ran no
+    cleanup code, since macOS has no PR_SET_PDEATHSIG.
+    """
+    import bigbro.__main__ as cli
+
+    monkeypatch.setattr(cli, "_PARENT_POLL_SECONDS", 0.01)
+    parents = iter([4242, 4242, 1])
+    monkeypatch.setattr(cli.os, "getppid", lambda: next(parents))
+
+    stopped = asyncio.Event()
+
+    class FakeDaemon:
+        def stop(self) -> None:
+            stopped.set()
+
+    await asyncio.wait_for(cli._stop_when_orphaned(FakeDaemon()), 2)
+    assert stopped.is_set()
+
+
+async def test_the_orphan_watcher_gives_up_if_already_orphaned(monkeypatch):
+    """Started with no parent to outlive — watching would stop it immediately."""
+    import bigbro.__main__ as cli
+
+    monkeypatch.setattr(cli.os, "getppid", lambda: 1)
+
+    class FakeDaemon:
+        stopped = False
+
+        def stop(self) -> None:
+            FakeDaemon.stopped = True
+
+    await asyncio.wait_for(cli._stop_when_orphaned(FakeDaemon()), 2)
+    assert FakeDaemon.stopped is False

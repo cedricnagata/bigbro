@@ -7,7 +7,13 @@ name = "bigbro"
 version = "1.0.0"
 description = "Turn your Mac into a local AI inference server for nearby iOS devices"
 readme = "README.md"
-requires-python = ">=3.10"
+# Upper bound because of the macOS dependency chain, not the code. mlx-audio
+# pulls in misaki, which pulls in spaCy, which publishes wheels only up to
+# cp313 — so on Apple silicon a 3.14 interpreter fails while resolving, with an
+# error that names spaCy rather than anything recognisable. Declaring the real
+# ceiling lets uv pick an interpreter that works instead of failing against
+# whichever one happens to be default. Raise it when spaCy ships cp314.
+requires-python = ">=3.10,<3.14"
 license = { text = "MIT" }
 authors = [{ name = "Cedric Nagata" }]
 keywords = ["mlx", "apple-silicon", "llm", "inference", "bonjour"]
@@ -25,7 +31,6 @@ classifiers = [
 dependencies = [
     "huggingface-hub>=0.27",
     "numpy>=1.26",
-    "textual>=0.80",
     "mlx-lm>=0.28; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "mlx-vlm>=0.3; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "mlx-audio>=0.4.6; sys_platform == 'darwin' and platform_machine == 'arm64'",

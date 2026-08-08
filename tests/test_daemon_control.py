@@ -188,3 +188,159 @@ async def test_the_verbs_accept_speech_models(daemon):
     for command in ("models.stop", "models.delete"):
         reply = await daemon.handle_control({"command": command, "model": "tts"})
         assert reply["ok"] is True, command
+
+
+# MARK: - Shutdown
+
+
+async def test_shutdown_acknowledges_before_it_stops(daemon):
+    """The reply has to win the race against the socket it is sent on.
+
+    `stop()` sets the event `run()` waits on, and shutdown closes the control
+    socket. Firing it inline would tear the connection down before the caller
+    heard anything, which reads as a crash rather than a clean stop.
+    """
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    scheduled: list[float] = []
+    real_call_later = loop.call_later
+
+    def record(delay, callback, *args):
+        scheduled.append(delay)
+        return real_call_later(delay, callback, *args)
+
+    loop.call_later = record  # type: ignore[method-assign]
+    try:
+        reply = await daemon.handle_control({"command": "daemon.shutdown"})
+    finally:
+        loop.call_later = real_call_later  # type: ignore[method-assign]
+
+    assert reply["ok"] is True
+    assert reply["stopping"] is True
+    # Deferred, not immediate.
+    assert scheduled and scheduled[0] > 0
+
+
+async def test_shutdown_actually_sets_the_stop_event(daemon):
+    import asyncio
+
+    await daemon.handle_control({"command": "daemon.shutdown"})
+    await asyncio.sleep(0.2)
+    assert daemon._stopping.is_set()
+
+
+async def test_every_route_that_moves_a_model_reaches_attached_uis(daemon):
+    """Three things load models — a control command, a peer's `run`, and the lazy
+    load a plain inference request triggers — and all three have to announce it."""
+    assert daemon.router.on_model_change == daemon._publish_model_state
+    assert daemon.engine.on_state_change == daemon._publish_model_state
+
+    queue = daemon.events.subscribe()
+    daemon.engine.on_state_change("qwen3-4b")
+
+    import asyncio
+
+    event = await asyncio.wait_for(queue.get(), 1)
+    assert event["event"] == "model.state"
+    assert event["model"] == "qwen3-4b"
+
+
+async def test_a_load_announces_starting_before_it_finishes(daemon):
+    """The long silence this closes.
+
+    `state()` reports "starting" the moment the load task is registered, but
+    nothing announced that transition — only the finish was announced. So a model
+    started from a phone sat on "downloaded" for the entire load and then blinked
+    to "running", which for a 12 GB model is minutes of a row saying nothing is
+    happening. The app papered over it for locally-issued commands by spinning on
+    a flag it set itself, which is exactly why the gap only showed up remotely.
+    """
+    import asyncio
+
+    from bigbro.inference.catalog import resolve
+
+    engine = daemon.engine
+    model = resolve("llama-3.2-1b")
+
+    announced: list[tuple[str, str]] = []
+    engine.on_state_change = lambda mid: announced.append((mid, engine.state_description(mid)))
+    # Whether these weights happen to be on this disk is not what is under test,
+    # and it decides between "starting" and "downloading".
+    engine.is_downloaded = lambda _model_id: True
+
+    release = asyncio.Event()
+
+    async def slow_load(_model):
+        await release.wait()
+        return object()
+
+    engine._load = slow_load
+
+    task = asyncio.create_task(engine.run(model))
+    await asyncio.sleep(0)  # let run() register the load task
+
+    assert announced == [(model.id, "starting")], "the start of a load was not announced"
+
+    release.set()
+    await task
+
+
+async def test_stopping_a_speech_model_announces_it(daemon):
+    """The bug this covers: stopping Kokoro left the row spinning.
+
+    The control handler announced state for a language model and returned silently
+    for a speech one, so an attached UI heard nothing — and the spinner it had put
+    up when it sent the command had nothing to clear it but a timeout.
+    """
+    import asyncio
+
+    from bigbro.speech import ModelKind
+
+    queue = daemon.events.subscribe()
+    # Stop only announces a real transition, so it has to be loaded first.
+    daemon.speech._loaded[ModelKind.TTS] = object()
+
+    daemon.speech.stop(ModelKind.TTS)
+
+    event = await asyncio.wait_for(queue.get(), 1)
+    assert event["event"] == "model.state"
+    assert event["model"] == ModelKind.TTS.model.id
+    assert event["state"] == "downloaded" or event["state"] == "not downloaded"
+
+
+async def test_a_stop_that_changes_nothing_announces_nothing(daemon):
+    """Stopping something already stopped is not a transition to report."""
+    from bigbro.speech import ModelKind
+
+    queue = daemon.events.subscribe()
+    daemon.speech.stop(ModelKind.STT)
+    assert queue.empty()
+
+
+async def test_a_speech_load_announces_starting(daemon):
+    """Whoever asks — a control command, or a phone wanting to be spoken to."""
+    import asyncio
+
+    from bigbro.speech import ModelKind
+
+    announced: list[tuple[str, str]] = []
+    daemon.speech.on_state_change = lambda mid: announced.append(
+        (mid, daemon.speech.state_description(ModelKind.TTS))
+    )
+    daemon.speech.is_downloaded = lambda _kind: True
+
+    release = asyncio.Event()
+
+    async def slow_load(_kind):
+        await release.wait()
+        return object()
+
+    daemon.speech._load = slow_load
+
+    task = asyncio.create_task(daemon.speech.run(ModelKind.TTS))
+    await asyncio.sleep(0)
+
+    assert announced == [(ModelKind.TTS.model.id, "starting")]
+    release.set()
+    await task

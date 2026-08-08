@@ -20,7 +20,7 @@ import pathlib
 import queue
 import struct
 from enum import Enum
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 import numpy as np
 
@@ -232,6 +232,16 @@ class SpeechEngine:
 
         self.downloader = downloader or ModelDownloader()
         self.record = self.downloader.record
+        #: Set by the daemon: called with a catalog id whenever a speech model
+        #: starts loading, finishes, fails or is stopped.
+        #:
+        #: The same hook MLXEngine carries, and here for the same reason. Speech
+        #: is a second engine with a second lifecycle, so a Kokoro that only the
+        #: control handlers announced was announced from one of the routes that
+        #: move it — a phone asking to speak loads it too, and `stop` did not
+        #: announce at all, which left the row spinning over a model already
+        #: unloaded.
+        self.on_state_change: Callable[[str], None] = lambda _model_id: None
         self._loaded: dict[ModelKind, object] = {}
         self._load_tasks: dict[ModelKind, asyncio.Task] = {}
         self._errors: dict[ModelKind, str] = {}
@@ -280,6 +290,8 @@ class SpeechEngine:
 
         task = asyncio.create_task(self._load(kind))
         self._load_tasks[kind] = task
+        # Registering the task is the transition to "starting"; see MLXEngine.run.
+        self.on_state_change(kind.model.id)
         try:
             return await task
         finally:
@@ -297,10 +309,12 @@ class SpeechEngine:
             message = str(exc) or type(exc).__name__
             self._errors[kind] = message
             log.error("failed to load %s: %s", kind.display_name, message)
+            self.on_state_change(kind.model.id)
             raise SpeechError(f"Could not load {kind.display_name}: {message}") from exc
 
         self._loaded[kind] = loaded
         self._errors.pop(kind, None)
+        self.on_state_change(kind.model.id)
         log.info("%s is running", kind.display_name)
         return loaded
 
@@ -318,6 +332,9 @@ class SpeechEngine:
             return
         self._errors.pop(kind, None)
         log.info("stopped %s", kind.display_name)
+        # Announced after the state has actually changed, and only when something
+        # changed — the early return above is a no-op stop, not a transition.
+        self.on_state_change(kind.model.id)
         mlx_thread.fire_and_forget(mlx_thread.clear_cache)
 
     def remove(self, kind: ModelKind) -> None:
