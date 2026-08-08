@@ -266,6 +266,36 @@ public struct ModelEntry: Decodable, Sendable, Equatable, Identifiable {
     }
 }
 
+/// What the two buttons on a model row should say, and whether they can be used.
+///
+/// The daemon reports state as prose — "running", "downloading 47%", "not
+/// downloaded", "error: no space left" — and the four verbs sit on two
+/// independent axes: download/delete is about disk, start/stop is about memory.
+/// Reading that prose lives here rather than in the view so it can be tested,
+/// and so both axes agree about what a state means.
+public extension ModelEntry {
+    var isRunning: Bool { state.hasPrefix("running") }
+    var isStarting: Bool { state.hasPrefix("starting") }
+    var isDownloading: Bool { state.hasPrefix("downloading") }
+
+    /// Whether the weights are on disk. `error` counts as absent so the button
+    /// offers a retry rather than a delete for something that may not be there.
+    var hasWeights: Bool { isRunning || isStarting || state.hasPrefix("downloaded") }
+
+    /// Stop what is running, start what is merely downloaded.
+    var runActionIsStop: Bool { isRunning }
+
+    /// Nothing to start without weights, and `starting` is already in flight.
+    var canRunAction: Bool { hasWeights && !isStarting }
+
+    /// Delete once the weights exist, download when they do not.
+    var weightsActionIsDelete: Bool { hasWeights }
+
+    /// Deleting under a loaded model would pull the file out from beneath it, and
+    /// a download already running has nothing to offer.
+    var canWeightsAction: Bool { !isDownloading && !isRunning && !isStarting }
+}
+
 public struct ModelGroup: Decodable, Sendable, Equatable, Identifiable {
     public let family: String
     public let label: String

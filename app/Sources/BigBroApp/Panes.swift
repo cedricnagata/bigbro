@@ -42,14 +42,22 @@ struct DevicesPane: View {
                 TableColumn("App") { Text($0.appName) }
                 TableColumn("ID") { Text(String($0.deviceId.prefix(8))).monospaced() }
                 TableColumn("") { device in
-                    Menu("") {
+                    HStack(spacing: 6) {
+                        // Only meaningful while it is actually attached — closing a
+                        // connection that is not open does nothing worth offering.
                         Button("Disconnect") {
                             Task { await state.dashboard.disconnect(deviceId: device.deviceId) }
                         }
-                        Button("Forget", role: .destructive) {
+                        .disabled(!device.connected)
+
+                        // Forgetting is not destructive the way deleting weights is:
+                        // the device simply has to be approved again next time.
+                        Button("Forget") {
                             Task { await state.dashboard.forget(deviceId: device.deviceId) }
                         }
                     }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
             }
             .overlay {
@@ -115,20 +123,35 @@ struct ModelPane: View {
             TableColumn("Memory") { model in
                 Text(Formatting.human(model.memory)).monospacedDigit()
             }
+            // Two buttons, always both present, each showing the verb that
+            // applies right now. A row whose controls move or disappear between
+            // states is a row you have to re-read every time it changes; the
+            // labels swap instead, and what cannot be done is disabled rather
+            // than hidden.
             TableColumn("") { model in
-                HStack {
-                    if model.state.hasPrefix("not downloaded") {
-                        Button("Download") { Task { await state.dashboard.download(model.id) } }
-                    } else if model.state.hasPrefix("running") {
-                        Button("Stop") { Task { await state.dashboard.stop(model.id) } }
-                    } else if model.state.hasPrefix("downloaded") {
-                        Button("Start") { Task { await state.dashboard.start(model.id) } }
+                HStack(spacing: 6) {
+                    Button(model.runActionIsStop ? "Stop" : "Start") {
+                        Task {
+                            if model.runActionIsStop {
+                                await state.dashboard.stop(model.id)
+                            } else {
+                                await state.dashboard.start(model.id)
+                            }
+                        }
                     }
-                    Menu("") {
-                        Button("Delete Weights", role: .destructive) { confirmingDelete = model }
-                            .disabled(model.state.hasPrefix("not downloaded"))
+                    .disabled(!model.canRunAction)
+
+                    Button(model.weightsActionIsDelete ? "Delete" : "Download") {
+                        if model.weightsActionIsDelete {
+                            confirmingDelete = model
+                        } else {
+                            Task { await state.dashboard.download(model.id) }
+                        }
                     }
+                    .disabled(!model.canWeightsAction)
                 }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
         }
         .confirmationDialog(
