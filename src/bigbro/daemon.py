@@ -62,6 +62,8 @@ class Daemon:
         self.pairing.is_model_satisfied = self.engine.is_required_model_satisfied
         self.pairing.publish = self.events.publish
         self.router.on_peer_change = self._on_peer_change
+        self.router.on_model_change = self._publish_model_state
+        self.engine.on_state_change = self._publish_model_state
         self.downloader.on_progress = self._on_download_progress
 
         self._stopping = asyncio.Event()

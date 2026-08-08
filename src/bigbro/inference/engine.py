@@ -17,7 +17,7 @@ import logging
 import queue
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 from . import mlx_thread
 from .catalog import BigBroModel, Family, ReasoningStyle, resolve
@@ -94,6 +94,15 @@ class ResolvedRequest:
 class MLXEngine:
     def __init__(self, downloader: ModelDownloader | None = None) -> None:
         self.downloader = downloader or ModelDownloader()
+        #: Set by the daemon: called with a catalog id whenever a model finishes
+        #: loading, fails to load, or is unloaded.
+        #:
+        #: Here rather than in the callers because there are three of them — a
+        #: control command, a peer's `run`, and the lazy load a plain inference
+        #: request triggers — and only the third is easy to forget. A model an
+        #: iPhone loaded by asking it a question would otherwise read as
+        #: `downloaded` in every attached UI while the log said it was running.
+        self.on_state_change: Callable[[str], None] = lambda _model_id: None
         self._loaded: dict[str, Any] = {}                       # id → (model, processor)
         self._load_tasks: dict[str, asyncio.Task] = {}
         self._errors: dict[str, str] = {}
@@ -181,10 +190,12 @@ class MLXEngine:
         except Exception as exc:
             self._errors[model.id] = str(exc)
             log.error("failed to load %s: %s", model.id, exc)
+            self.on_state_change(model.id)
             raise
 
         self._loaded[model.id] = loaded
         self._errors.pop(model.id, None)
+        self.on_state_change(model.id)
         log.info(
             "%s is running%s",
             model.display_name,
@@ -227,6 +238,7 @@ class MLXEngine:
             return
         self._errors.pop(model_id, None)
         self._memory.pop(model_id, None)
+        self.on_state_change(model_id)
         log.info("stopped %s", model_id)
         # Reclaim what the model was holding. MLX caches buffers between requests,
         # and those survive the model object going away unless the cache is

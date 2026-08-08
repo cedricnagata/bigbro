@@ -228,3 +228,19 @@ async def test_shutdown_actually_sets_the_stop_event(daemon):
     await daemon.handle_control({"command": "daemon.shutdown"})
     await asyncio.sleep(0.2)
     assert daemon._stopping.is_set()
+
+
+async def test_every_route_that_moves_a_model_reaches_attached_uis(daemon):
+    """Three things load models — a control command, a peer's `run`, and the lazy
+    load a plain inference request triggers — and all three have to announce it."""
+    assert daemon.router.on_model_change == daemon._publish_model_state
+    assert daemon.engine.on_state_change == daemon._publish_model_state
+
+    queue = daemon.events.subscribe()
+    daemon.engine.on_state_change("qwen3-4b")
+
+    import asyncio
+
+    event = await asyncio.wait_for(queue.get(), 1)
+    assert event["event"] == "model.state"
+    assert event["model"] == "qwen3-4b"
