@@ -207,6 +207,7 @@ class Daemon:
             "models.remove": self._control_models_delete,
             "settings.get": self._control_settings_get,
             "settings.set": self._control_settings_set,
+            "daemon.shutdown": self._control_shutdown,
         }
         handler = handlers.get(command)
         if handler is None:
@@ -428,6 +429,25 @@ class Daemon:
         return {"ok": True, "model": model.id}
 
     # MARK: - Settings
+
+    async def _control_shutdown(self, _request: dict[str, Any]) -> dict[str, Any]:
+        """Stops the daemon, on purpose, from somewhere else.
+
+        Until now the only ways to stop a daemon were Ctrl-C in whichever terminal
+        started it, or finding its pid. That leaves an orphan — a daemon whose UI
+        crashed, or one started in a terminal window since closed — holding the
+        Mac awake with nothing obvious to stop it. BigBro.app cannot send SIGTERM
+        to a process it did not spawn, but it is already holding this socket.
+
+        The stop is scheduled rather than immediate: `stop()` sets the event
+        `run()` is waiting on, and shutdown closes this very socket. Firing it
+        now would race the reply, and the caller would see the connection drop
+        instead of an acknowledgement.
+        """
+        log.info("shutdown requested over the control socket")
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.1, self.stop)
+        return {"ok": True, "stopping": True}
 
     async def _control_settings_get(self, _request: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True, "settings": self.settings.to_wire(), "editable": list(Settings.EDITABLE)}

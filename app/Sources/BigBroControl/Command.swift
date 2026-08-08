@@ -69,6 +69,10 @@ public extension Command {
         Command("settings.set", ["key": .string(key), "value": value])
     }
 
+    /// Asks the daemon to stop itself. The only way to stop one this process did
+    /// not spawn — there is no pid to signal, but there is always this socket.
+    static let shutdown = Command("daemon.shutdown")
+
     /// The one command that turns a connection into a long-lived event stream.
     static let subscribe = Command("subscribe")
 }

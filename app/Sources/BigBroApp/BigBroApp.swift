@@ -49,7 +49,7 @@ final class AppState {
     func end() async {
         pump?.cancel()
         pump = nil
-        await daemon.stop()
+        await daemon.stopIfOwned()
     }
 
     var statusLine: String {
@@ -131,7 +131,11 @@ struct MenuBarContent: View {
         Divider()
         Button("Open Dashboard") { openDashboard() }
         if state.daemon.canStop {
-            Button("Stop Daemon") { Task { await state.daemon.stop() } }
+            // Says whose it is, because stopping one you did not start is a
+            // different decision from stopping your own.
+            Button(state.daemon.stopsOnQuit ? "Stop Daemon" : "Stop Daemon (started elsewhere)") {
+                Task { await state.daemon.stop() }
+            }
         } else if !state.daemon.isRunning {
             Button("Start Daemon") { Task { await state.daemon.startOrAttach() } }
         }

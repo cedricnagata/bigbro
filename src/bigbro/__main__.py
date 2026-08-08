@@ -48,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--no-ui", action="store_true", help=argparse.SUPPRESS)
 
     sub.add_parser("status", help="show what the running daemon is doing")
+    sub.add_parser("shutdown", help="stop the running daemon")
 
     pair = sub.add_parser("pair", help="manage paired devices").add_subparsers(dest="action", required=True)
     pair.add_parser("list", help="list paired devices and pending requests")
@@ -125,6 +126,20 @@ def _call(command: dict) -> dict:
     except ControlClientError as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
+
+
+def cmd_shutdown(_args: argparse.Namespace) -> int:
+    """Stops a daemon started anywhere — a terminal since closed, or BigBro.app.
+
+    Ctrl-C only works if you still have the terminal that started it, and a
+    daemon nobody can see is still holding the Mac awake.
+    """
+    reply = _call({"command": "daemon.shutdown"})
+    if not reply.get("ok"):
+        print(f"error: {reply.get('error', 'the daemon refused to stop')}", file=sys.stderr)
+        return 1
+    print("daemon stopping")
+    return 0
 
 
 def cmd_status(_args: argparse.Namespace) -> int:
@@ -312,6 +327,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_serve(args)
     if args.command == "status":
         return cmd_status(args)
+    if args.command == "shutdown":
+        return cmd_shutdown(args)
     if args.command == "pair":
         return cmd_pair(args)
     if args.command == "models":

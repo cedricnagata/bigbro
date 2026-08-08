@@ -188,3 +188,43 @@ async def test_the_verbs_accept_speech_models(daemon):
     for command in ("models.stop", "models.delete"):
         reply = await daemon.handle_control({"command": command, "model": "tts"})
         assert reply["ok"] is True, command
+
+
+# MARK: - Shutdown
+
+
+async def test_shutdown_acknowledges_before_it_stops(daemon):
+    """The reply has to win the race against the socket it is sent on.
+
+    `stop()` sets the event `run()` waits on, and shutdown closes the control
+    socket. Firing it inline would tear the connection down before the caller
+    heard anything, which reads as a crash rather than a clean stop.
+    """
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    scheduled: list[float] = []
+    real_call_later = loop.call_later
+
+    def record(delay, callback, *args):
+        scheduled.append(delay)
+        return real_call_later(delay, callback, *args)
+
+    loop.call_later = record  # type: ignore[method-assign]
+    try:
+        reply = await daemon.handle_control({"command": "daemon.shutdown"})
+    finally:
+        loop.call_later = real_call_later  # type: ignore[method-assign]
+
+    assert reply["ok"] is True
+    assert reply["stopping"] is True
+    # Deferred, not immediate.
+    assert scheduled and scheduled[0] > 0
+
+
+async def test_shutdown_actually_sets_the_stop_event(daemon):
+    import asyncio
+
+    await daemon.handle_control({"command": "daemon.shutdown"})
+    await asyncio.sleep(0.2)
+    assert daemon._stopping.is_set()

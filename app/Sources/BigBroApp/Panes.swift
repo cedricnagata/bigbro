@@ -254,8 +254,8 @@ struct SettingsPane: View {
                 // terminal dashboard this app owns the process, so it can offer one.
                 Button("Restart Daemon") { Task { await state.daemon.restart() } }
                     .disabled(!state.daemon.canStop)
-                if !state.daemon.canStop && state.daemon.isRunning {
-                    Text("This daemon was started elsewhere, so BigBro will not stop it.")
+                if state.daemon.isRunning && !state.daemon.stopsOnQuit {
+                    Text("This daemon was started elsewhere. BigBro will leave it running when you quit, but you can stop it here.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

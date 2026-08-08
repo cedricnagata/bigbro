@@ -143,7 +143,14 @@ and the CLI are always talking about the same thing.
 bigbro serve                    # run the daemon
 bigbro serve --port 9000        # listen somewhere else
 bigbro serve --no-keep-awake    # let the Mac sleep normally while serving
+bigbro shutdown                 # stop it, from anywhere
 ```
+
+`shutdown` matters more than it looks. A daemon outlives whatever started it — that
+is deliberate, since it may be holding a twelve-gigabyte model or answering a phone,
+and neither should end because a window closed. But it also means a daemon can end up
+with nothing visible attached to it, still holding the Mac awake. `bigbro shutdown`
+reaches it over the control socket, so you never have to go looking for a pid.
 
 Leave it running, or put it behind launchd. Every other command talks to the running daemon over a
 Unix socket, so they work from any shell — including when the daemon has no terminal at all, and

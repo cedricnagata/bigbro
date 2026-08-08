@@ -96,8 +96,17 @@ public final class DaemonController {
     }
 
     public var isRunning: Bool { mode != .stopped }
-    /// Only an owned daemon gets a Stop button — you cannot stop what you did not start.
-    public var canStop: Bool { mode == .owned }
+
+    /// Stopping is offered for anything that is running, including a daemon
+    /// started elsewhere. An orphan — one whose app crashed, or one from a
+    /// terminal window since closed — is otherwise visible here and stoppable
+    /// nowhere, while still holding the Mac awake.
+    public var canStop: Bool { mode != .stopped }
+
+    /// Quitting, though, only stops what we started. Taking down someone's
+    /// `bigbro serve` because they closed a window they never associated with it
+    /// is a different thing from being asked to stop it.
+    public var stopsOnQuit: Bool { mode == .owned }
 
     /// Attaches if a daemon is already up, otherwise starts one.
     public func startOrAttach() async {
@@ -207,9 +216,17 @@ public final class DaemonController {
             ?? "The daemon stopped unexpectedly (exit code \(status))."
     }
 
-    /// Stops an owned daemon. An attached one is left alone.
+    /// Stops the daemon, however it was started.
+    ///
+    /// An owned one gets SIGTERM, which its signal handler turns into a clean
+    /// shutdown. An attached one cannot be signalled — we have no handle on a
+    /// process we did not spawn — so it is asked over the control socket, which
+    /// reaches the same `stop()` on the other side.
     public func stop() async {
+        guard mode != .stopped else { return }
+
         guard mode == .owned, let task = process else {
+            try? await client.call(.shutdown)
             mode = .stopped
             return
         }
@@ -235,6 +252,12 @@ public final class DaemonController {
     public func restart() async {
         await stop()
         await start()
+    }
+
+    /// What quitting does: stop a daemon we started, leave anything else serving.
+    public func stopIfOwned() async {
+        guard stopsOnQuit else { return }
+        await stop()
     }
 
     // MARK: - Finding something to run
