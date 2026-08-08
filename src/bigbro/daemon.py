@@ -15,7 +15,7 @@ import signal
 import sys
 from typing import Any
 
-from .config import DEFAULT_PORT, Settings
+from .config import Settings
 from .control import ControlServer
 from .events import EventBus
 from .inference import catalog

@@ -17,7 +17,7 @@ from .inference.engine import InferenceError, MLXEngine
 from .inference.parsers import Delta, Reasoning, ToolCall
 from .protocol.pairing import PairingManager
 from .protocol.server import PeerServer
-from .speech import ModelKind, SpeechEngine, SpeechError, kinds_for
+from .speech import ModelKind, SpeechEngine, kinds_for
 
 log = logging.getLogger("bigbro.router")
 
