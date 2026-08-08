@@ -166,6 +166,14 @@ class MLXEngine:
 
         task = asyncio.create_task(self._load(model))
         self._load_tasks[model.id] = task
+        # Registering the task *is* the transition to "starting" — `state()` reads
+        # it straight off `_load_tasks`. Announced here for the same reason the
+        # finish is announced from `_load`: three routes load a model, and an
+        # announcement left to the callers is one a fourth caller will forget.
+        # Without it a load begun by a phone is invisible until it completes, so
+        # the row sits on "downloaded" through the slowest part and then blinks to
+        # "running" — and for a 12 GB model that is minutes of saying nothing.
+        self.on_state_change(model.id)
         try:
             return await task
         finally:

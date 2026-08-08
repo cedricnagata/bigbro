@@ -302,3 +302,72 @@ final class DashboardModelTests: XCTestCase {
         XCTAssertEqual(DashboardModel.leadingWord("error: no space left"), "error:")
     }
 }
+
+// MARK: - Work someone else started
+
+@MainActor
+final class RemoteWorkTests: XCTestCase {
+    private func loaded(
+        _ transport: StubTransport, _ states: [(id: String, state: String)]
+    ) async -> DashboardModel {
+        transport.reply(to: "models.list", with: StubTransport.modelsList(states))
+        let dashboard = DashboardModel(transport: transport)
+        await dashboard.refresh()
+        transport.forgetTraffic()
+        return dashboard
+    }
+
+    /// The bug this covers: a model started from an iPhone showed no spinner.
+    ///
+    /// The spinner was driven entirely by a flag this app set when it sent a
+    /// command, so it was really reporting "I asked for this" rather than "this
+    /// is loading". A phone's `run` sets no such flag, which is why the gap only
+    /// appeared remotely — and why it looked fine every time it was tested by
+    /// pressing the button.
+    func testAModelStartedElsewhereShowsAsBusy() async throws {
+        let transport = try StubTransport()
+        let dashboard = await loaded(transport, [("m1", "downloaded")])
+        XCTAssertFalse(dashboard.isBusy("m1"))
+
+        // A stage change re-reads the list, so the stub has to answer the way the
+        // daemon would once the load has begun — otherwise the refetch puts
+        // "downloaded" straight back and the test measures the stub, not the app.
+        transport.reply(to: "models.list", with: StubTransport.modelsList([("m1", "starting")]))
+        await dashboard.handle(.modelState(model: "m1", state: "starting"))
+
+        XCTAssertTrue(dashboard.isBusy("m1"), "a load someone else began still shows no spinner")
+    }
+
+    func testItStopsBeingBusyOnceItIsRunning() async throws {
+        let transport = try StubTransport()
+        let dashboard = await loaded(transport, [("m1", "starting")])
+        XCTAssertTrue(dashboard.isBusy("m1"))
+
+        transport.reply(to: "models.list", with: StubTransport.modelsList([("m1", "running")]))
+        await dashboard.handle(.modelState(model: "m1", state: "running"))
+
+        XCTAssertFalse(dashboard.isBusy("m1"))
+    }
+
+    /// A download draws a determinate bar with a percentage on it; a spinner
+    /// beside it would be two answers to one question.
+    func testADownloadIsNotSpunOver() async throws {
+        let transport = try StubTransport()
+        let dashboard = await loaded(transport, [("m1", "downloading 42%")])
+        XCTAssertFalse(dashboard.isBusy("m1"))
+    }
+
+    func testAFailedLoadClearsTheSpinner() async throws {
+        let transport = try StubTransport()
+        let dashboard = await loaded(transport, [("m1", "starting")])
+        XCTAssertTrue(dashboard.isBusy("m1"))
+
+        transport.reply(
+            to: "models.list", with: StubTransport.modelsList([("m1", "error: no space left")])
+        )
+        await dashboard.handle(.modelState(model: "m1", state: "error: no space left"))
+
+        // Otherwise the row spins forever over something already given up on.
+        XCTAssertFalse(dashboard.isBusy("m1"))
+    }
+}

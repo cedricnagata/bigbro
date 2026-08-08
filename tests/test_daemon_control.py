@@ -244,3 +244,43 @@ async def test_every_route_that_moves_a_model_reaches_attached_uis(daemon):
     event = await asyncio.wait_for(queue.get(), 1)
     assert event["event"] == "model.state"
     assert event["model"] == "qwen3-4b"
+
+
+async def test_a_load_announces_starting_before_it_finishes(daemon):
+    """The long silence this closes.
+
+    `state()` reports "starting" the moment the load task is registered, but
+    nothing announced that transition — only the finish was announced. So a model
+    started from a phone sat on "downloaded" for the entire load and then blinked
+    to "running", which for a 12 GB model is minutes of a row saying nothing is
+    happening. The app papered over it for locally-issued commands by spinning on
+    a flag it set itself, which is exactly why the gap only showed up remotely.
+    """
+    import asyncio
+
+    from bigbro.inference.catalog import resolve
+
+    engine = daemon.engine
+    model = resolve("llama-3.2-1b")
+
+    announced: list[tuple[str, str]] = []
+    engine.on_state_change = lambda mid: announced.append((mid, engine.state_description(mid)))
+    # Whether these weights happen to be on this disk is not what is under test,
+    # and it decides between "starting" and "downloading".
+    engine.is_downloaded = lambda _model_id: True
+
+    release = asyncio.Event()
+
+    async def slow_load(_model):
+        await release.wait()
+        return object()
+
+    engine._load = slow_load
+
+    task = asyncio.create_task(engine.run(model))
+    await asyncio.sleep(0)  # let run() register the load task
+
+    assert announced == [(model.id, "starting")], "the start of a load was not announced"
+
+    release.set()
+    await task

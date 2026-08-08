@@ -239,7 +239,25 @@ public final class DashboardModel {
     public func delete(_ model: String) async { await act(.modelsDelete(model), on: model) }
 
     /// Whether a command for this model has been sent and nothing has come back.
-    public func isBusy(_ modelID: String) -> Bool { inFlight[modelID] != nil }
+    /// States that mean the daemon is mid-way through something, whoever asked.
+    ///
+    /// Only "starting". A download reports a percentage and gets a determinate
+    /// bar of its own, and an indeterminate spinner beside a bar that already
+    /// says 42% is worse than either alone.
+    private static let workingStates: Set<String> = ["starting"]
+
+    /// Whether a row should show a spinner.
+    ///
+    /// Two sources, and the second is the one that matters. `inFlight` covers the
+    /// gap between sending a command and the daemon reporting anything back — it
+    /// is optimism about a command *this* app sent. But a model is just as busy
+    /// when a phone started it, and that case has no local flag to set. Reading
+    /// the state the daemon reports covers both, and is the only thing that can
+    /// cover the remote one.
+    public func isBusy(_ modelID: String) -> Bool {
+        if inFlight[modelID] != nil { return true }
+        return Self.workingStates.contains(Self.leadingWord(stateOf(modelID)))
+    }
 
     private func act(_ command: Command, on modelID: String) async {
         markBusy(modelID)
