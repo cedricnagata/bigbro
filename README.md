@@ -107,10 +107,9 @@ actually diff. Editing the project in Xcode's inspector works until the next `xc
 project when the spec is re-read.
 
 The scheme sets `BIGBRO_DAEMON_COMMAND` to the project's own venv, so ⌘R can start a daemon
-without a bundled runtime. If you already have one running — `bigbro serve` in a terminal — the
-app finds it, attaches, and leaves it running when you quit; the override is never reached. That
-is the same attach-don't-duplicate behaviour a release build has, so it is worth exercising both
-ways.
+without a bundled runtime. If you already have one running — `bigbro serve` in a terminal — the app
+finds and attaches to it rather than starting a second, and the override is never reached. Worth
+exercising both ways, and worth knowing that quitting the app stops that daemon too.
 
 Xcode signs development builds with your Apple Development identity and the real entitlements,
 hardened runtime included. That matters beyond convenience: notifications need a genuine signature
@@ -122,7 +121,7 @@ CI does not use any of this. It builds the package with SwiftPM and assembles th
 `app/Scripts/make-app.sh`, so nothing in the Xcode project can break a release.
 
 ```sh
-swift test --package-path app      # the same 73 tests CI runs
+swift test --package-path app      # the same Swift tests CI runs
 uv run --extra dev pytest          # and the Python side
 ```
 
@@ -132,10 +131,14 @@ Open BigBro. The menu bar item is the day-to-day face of it: serving state at a 
 models are loaded, and Approve/Deny right there when a phone asks to pair — no window to go
 hunting for. The window has the detail.
 
-The app starts the daemon itself and stops it when you quit. If a daemon is *already* running —
-you started one in a terminal, or put one behind launchd — BigBro attaches to that one instead and
-leaves it running when you quit. There is only ever one daemon and one control socket, so the app
-and the CLI are always talking about the same thing.
+The app starts the daemon itself and stops it when you quit — including when it is force-quit or
+crashes, which it cannot notice from the inside, so the daemon watches for the app disappearing and
+shuts itself down. Nothing is left holding the Mac awake.
+
+If a daemon is *already* running — you started one in a terminal, or put one behind launchd —
+BigBro attaches to that one rather than starting a second, and says so in the menu. Quitting stops
+that one too. There is only ever one daemon and one control socket, so the app and the CLI are
+always talking about the same thing.
 
 ### From a terminal
 
@@ -146,11 +149,17 @@ bigbro serve --no-keep-awake    # let the Mac sleep normally while serving
 bigbro shutdown                 # stop it, from anywhere
 ```
 
-`shutdown` matters more than it looks. A daemon outlives whatever started it — that
-is deliberate, since it may be holding a twelve-gigabyte model or answering a phone,
-and neither should end because a window closed. But it also means a daemon can end up
-with nothing visible attached to it, still holding the Mac awake. `bigbro shutdown`
-reaches it over the control socket, so you never have to go looking for a pid.
+A daemon started from a terminal keeps serving until you stop it. `bigbro shutdown`
+reaches it over the control socket, so you never have to go looking for a pid — which
+matters because the daemon holds the Mac awake, and Ctrl-C only helps if you still
+have the window that started it.
+
+A daemon started by **BigBro.app** stops when the app does. Quitting sends it a stop;
+being force-quit or crashing sends nothing at all, so the daemon also watches for the
+process that started it disappearing (`--exit-with-parent`, passed on every spawn) and
+shuts itself down within a couple of seconds. macOS has no `PR_SET_PDEATHSIG`, so
+watching from the child is the only arrangement that survives a kill the parent never
+saw coming.
 
 Leave it running, or put it behind launchd. Every other command talks to the running daemon over a
 Unix socket, so they work from any shell — including when the daemon has no terminal at all, and

@@ -11,11 +11,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
+import os
 import sys
 
 from .config import DEFAULT_PORT
 from .control import ControlClientError, send_command
+
+log = logging.getLogger("bigbro.cli")
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -46,6 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
     # plists and shell history, and BigBro.app itself passes it — failing on it
     # would break the app for the sake of tidiness.
     serve.add_argument("--no-ui", action="store_true", help=argparse.SUPPRESS)
+    serve.add_argument(
+        "--exit-with-parent",
+        action="store_true",
+        help="stop when the process that started this one goes away",
+    )
 
     sub.add_parser("status", help="show what the running daemon is doing")
     sub.add_parser("shutdown", help="stop the running daemon")
@@ -92,13 +101,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
     daemon = Daemon(port=args.port, keep_awake=keep_awake)
 
     try:
-        asyncio.run(_serve(daemon))
+        asyncio.run(_serve(daemon, exit_with_parent=args.exit_with_parent))
     except KeyboardInterrupt:
         pass
     return 0
 
 
-async def _serve(daemon) -> None:
+async def _serve(daemon, exit_with_parent: bool = False) -> None:
     """Runs the daemon with logs on stderr, mirrored onto the event bus.
 
     The bus handler matters even though nothing in *this* process renders it: a
@@ -115,7 +124,50 @@ async def _serve(daemon) -> None:
     from .events import LogEventHandler
 
     logging.getLogger().addHandler(LogEventHandler(daemon.events))
-    await daemon.run()
+
+    watcher = None
+    if exit_with_parent:
+        watcher = asyncio.ensure_future(_stop_when_orphaned(daemon))
+    try:
+        await daemon.run()
+    finally:
+        if watcher is not None:
+            watcher.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watcher
+
+
+#: How often to check whether whoever started us is still there. Slow enough to
+#: cost nothing, fast enough that a force-quit does not leave the Mac awake.
+_PARENT_POLL_SECONDS = 2.0
+
+
+async def _stop_when_orphaned(daemon) -> None:
+    """Stops the daemon once the process that started it is gone.
+
+    BigBro.app asks its daemon to stop when it quits, and that covers quitting.
+    It cannot cover being force-quit or crashing: the app is sent SIGKILL and runs
+    no code, and macOS has no equivalent of Linux's PR_SET_PDEATHSIG to arrange
+    this from the parent's side.
+
+    So the child watches instead. A reparented process is an orphan — the kernel
+    hands it to launchd, and getppid() becomes 1 — which is the one signal that
+    survives a kill the parent never saw coming.
+
+    Only used when `--exit-with-parent` is passed, so a daemon started from a
+    terminal is unaffected by the shell that launched it exiting.
+    """
+    started_under = os.getppid()
+    if started_under == 1:
+        log.warning("--exit-with-parent: already an orphan at startup, ignoring")
+        return
+
+    while True:
+        await asyncio.sleep(_PARENT_POLL_SECONDS)
+        if os.getppid() != started_under:
+            log.info("the process that started bigbro is gone — shutting down")
+            daemon.stop()
+            return
 
 
 # MARK: - control-socket commands

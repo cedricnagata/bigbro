@@ -50,6 +50,24 @@ public final class DashboardModel {
     private var prompted: Set<String> = []
     private var nextLogID = 0
 
+    /// Model ids with a command in flight, against the state they were in when it
+    /// was sent.
+    ///
+    /// The four model verbs all answer immediately and report the real work as
+    /// events — `models.start` especially, because holding the reply through a
+    /// twelve gigabyte load would look like a freeze. That is right for the
+    /// daemon and wrong for a button, which otherwise sits there looking unpressed
+    /// for several seconds. Remembering the state at the time of the request lets
+    /// the spinner clear on the first event that actually changes something,
+    /// rather than on a timer or a guess.
+    private var inFlight: [String: String] = [:]
+    private var inFlightExpiry: [String: Task<Void, Never>] = [:]
+
+    /// How long a spinner may run before giving up on ever hearing back. A
+    /// backstop for a dropped event, not the normal path — a stuck spinner is
+    /// worse than an early one.
+    private static let inFlightTimeout: Duration = .seconds(30)
+
     public init(transport: ControlTransport) {
         self.transport = transport
     }
@@ -89,6 +107,7 @@ public final class DashboardModel {
     public func refreshModels() async {
         do {
             groups = try await send(.modelsList, as: ModelsList.self).groups
+            settleBusy()
         } catch {
             lastMessage = Self.describe(error)
         }
@@ -152,6 +171,7 @@ public final class DashboardModel {
         if moved {
             await refreshModels()
         }
+        settleBusy()
     }
 
     private func locate(_ modelID: String) -> (group: Int, entry: Int)? {
@@ -213,10 +233,52 @@ public final class DashboardModel {
     /// `models.start` answers the moment it has begun, because loading a 12 GB
     /// model takes long enough that holding the reply would look like a freeze.
     /// Real progress arrives as events, so none of these wait for completion.
-    public func download(_ model: String) async { await run(.modelsDownload(model), reread: false) }
-    public func start(_ model: String) async { await run(.modelsStart(model), reread: false) }
-    public func stop(_ model: String) async { await run(.modelsStop(model), reread: false) }
-    public func delete(_ model: String) async { await run(.modelsDelete(model), reread: false) }
+    public func download(_ model: String) async { await act(.modelsDownload(model), on: model) }
+    public func start(_ model: String) async { await act(.modelsStart(model), on: model) }
+    public func stop(_ model: String) async { await act(.modelsStop(model), on: model) }
+    public func delete(_ model: String) async { await act(.modelsDelete(model), on: model) }
+
+    /// Whether a command for this model has been sent and nothing has come back.
+    public func isBusy(_ modelID: String) -> Bool { inFlight[modelID] != nil }
+
+    private func act(_ command: Command, on modelID: String) async {
+        markBusy(modelID)
+        do {
+            try await call(command)
+        } catch {
+            lastMessage = Self.describe(error)
+            // A refused command produces no state change, so nothing would ever
+            // arrive to clear the spinner.
+            clearBusy(modelID)
+        }
+    }
+
+    private func markBusy(_ modelID: String) {
+        inFlight[modelID] = stateOf(modelID) ?? ""
+        inFlightExpiry[modelID]?.cancel()
+        inFlightExpiry[modelID] = Task { [weak self] in
+            try? await Task.sleep(for: Self.inFlightTimeout)
+            guard !Task.isCancelled else { return }
+            self?.clearBusy(modelID)
+        }
+    }
+
+    private func clearBusy(_ modelID: String) {
+        inFlight.removeValue(forKey: modelID)
+        inFlightExpiry.removeValue(forKey: modelID)?.cancel()
+    }
+
+    /// Clears any spinner whose model has moved on since its command was sent.
+    private func settleBusy() {
+        for (modelID, sentAt) in inFlight where stateOf(modelID) != sentAt {
+            clearBusy(modelID)
+        }
+    }
+
+    private func stateOf(_ modelID: String) -> String? {
+        guard let at = locate(modelID) else { return nil }
+        return groups[at.group].models[at.entry].state
+    }
 
     // MARK: - Settings
 

@@ -42,7 +42,7 @@ final class DaemonLaunchTests: XCTestCase {
         )
 
         XCTAssertEqual(launch?.executable, python.path)
-        XCTAssertEqual(launch?.arguments, ["-m", "bigbro", "serve", "--no-ui"])
+        XCTAssertEqual(launch?.arguments, ["-m", "bigbro", "serve", "--no-ui", "--exit-with-parent"])
     }
 
     func testAnInstalledCLIIsUsedWhenNothingIsBundled() throws {
@@ -54,7 +54,7 @@ final class DaemonLaunchTests: XCTestCase {
         )
 
         XCTAssertEqual(launch?.executable, cli.path)
-        XCTAssertEqual(launch?.arguments, ["serve", "--no-ui"])
+        XCTAssertEqual(launch?.arguments, ["serve", "--no-ui", "--exit-with-parent"])
     }
 
     func testTheBundleWinsOverAnInstalledCLI() throws {
@@ -83,7 +83,7 @@ final class DaemonLaunchTests: XCTestCase {
         )
 
         XCTAssertEqual(launch?.executable, "/usr/bin/env")
-        XCTAssertEqual(launch?.arguments, ["bigbro", "serve", "--no-ui"])
+        XCTAssertEqual(launch?.arguments, ["bigbro", "serve", "--no-ui", "--exit-with-parent"])
     }
 
     func testNothingToRunIsReportedRatherThanGuessed() {
@@ -91,6 +91,26 @@ final class DaemonLaunchTests: XCTestCase {
             resources: nil, environment: [:], pathCandidates: ["/nope/bigbro"]
         )
         XCTAssertNil(launch)
+    }
+
+    /// Every spawn asks the daemon to die with us. Quitting sends a stop, but a
+    /// force-quit or a crash runs no code at all — this is the only thing that
+    /// covers those, since macOS has no PR_SET_PDEATHSIG.
+    func testEverySpawnAsksTheDaemonToExitWithUs() throws {
+        let python = directory.appendingPathComponent("python/bin/python3")
+        let cli = directory.appendingPathComponent("bin/bigbro")
+        try makeExecutable(python)
+        try makeExecutable(cli)
+
+        for launch in [
+            DaemonController.resolveLaunch(resources: directory, environment: [:], pathCandidates: []),
+            DaemonController.resolveLaunch(resources: nil, environment: [:], pathCandidates: [cli.path]),
+            DaemonController.resolveLaunch(
+                resources: nil, environment: ["BIGBRO_DAEMON_COMMAND": cli.path], pathCandidates: []
+            ),
+        ] {
+            XCTAssertEqual(launch?.arguments.last, "--exit-with-parent")
+        }
     }
 
     /// `serve --no-ui` is always passed, never inferred from a tty check.
@@ -102,6 +122,6 @@ final class DaemonLaunchTests: XCTestCase {
             resources: directory, environment: [:], pathCandidates: []
         )
 
-        XCTAssertEqual(launch?.arguments.suffix(2), ["serve", "--no-ui"])
+        XCTAssertEqual(launch?.arguments.suffix(3), ["serve", "--no-ui", "--exit-with-parent"])
     }
 }

@@ -103,10 +103,14 @@ public final class DaemonController {
     /// nowhere, while still holding the Mac awake.
     public var canStop: Bool { mode != .stopped }
 
-    /// Quitting, though, only stops what we started. Taking down someone's
-    /// `bigbro serve` because they closed a window they never associated with it
-    /// is a different thing from being asked to stop it.
-    public var stopsOnQuit: Bool { mode == .owned }
+    /// Quitting stops the daemon, whoever started it.
+    ///
+    /// The alternative — leaving an attached daemon running — meant closing the
+    /// app could leave the Mac awake with nothing visible holding it, which is
+    /// the behaviour this replaces. Still worth knowing which one you are ending,
+    /// so the menu says when it was started elsewhere.
+    public var stopsOnQuit: Bool { mode != .stopped }
+    public var startedElsewhere: Bool { mode == .attached }
 
     /// Attaches if a daemon is already up, otherwise starts one.
     public func startOrAttach() async {
@@ -254,8 +258,8 @@ public final class DaemonController {
         await start()
     }
 
-    /// What quitting does: stop a daemon we started, leave anything else serving.
-    public func stopIfOwned() async {
+    /// What quitting does. Stops whatever is running, however it was started.
+    public func stopOnQuit() async {
         guard stopsOnQuit else { return }
         await stop()
     }
@@ -295,20 +299,20 @@ public final class DaemonController {
             var parts = override.split(separator: " ").map(String.init)
             guard !parts.isEmpty else { return nil }
             let executable = parts.removeFirst()
-            return Launch(executable: executable, arguments: parts + ["serve", "--no-ui"])
+            return Launch(executable: executable, arguments: parts + ["serve", "--no-ui", "--exit-with-parent"])
         }
 
         if let resources {
             let python = resources.appendingPathComponent("python/bin/python3")
             if fileManager.isExecutableFile(atPath: python.path) {
                 return Launch(
-                    executable: python.path, arguments: ["-m", "bigbro", "serve", "--no-ui"]
+                    executable: python.path, arguments: ["-m", "bigbro", "serve", "--no-ui", "--exit-with-parent"]
                 )
             }
         }
 
         for candidate in pathCandidates where fileManager.isExecutableFile(atPath: candidate) {
-            return Launch(executable: candidate, arguments: ["serve", "--no-ui"])
+            return Launch(executable: candidate, arguments: ["serve", "--no-ui", "--exit-with-parent"])
         }
 
         return nil

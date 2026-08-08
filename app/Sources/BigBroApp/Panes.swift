@@ -45,20 +45,22 @@ struct DevicesPane: View {
                     HStack(spacing: 6) {
                         // Only meaningful while it is actually attached — closing a
                         // connection that is not open does nothing worth offering.
-                        Button("Disconnect") {
+                        ActionButton(
+                            title: "Disconnect",
+                            enabled: device.connected,
+                            width: ActionButton.deviceWidth
+                        ) {
                             Task { await state.dashboard.disconnect(deviceId: device.deviceId) }
                         }
-                        .disabled(!device.connected)
 
                         // Forgetting is not destructive the way deleting weights is:
                         // the device simply has to be approved again next time.
-                        Button("Forget") {
+                        ActionButton(title: "Forget", width: ActionButton.deviceWidth) {
                             Task { await state.dashboard.forget(deviceId: device.deviceId) }
                         }
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
                 }
+                .width(min: ActionButton.deviceWidth * 2 + 6, ideal: ActionButton.deviceWidth * 2 + 6)
             }
             .overlay {
                 if state.dashboard.devices.isEmpty && state.dashboard.pending.isEmpty {
@@ -95,6 +97,11 @@ struct ModelPane: View {
 
     @State private var confirmingDelete: ModelEntry?
 
+    /// Wide enough for two buttons at their fixed width plus the gap. Set on the
+    /// column as a minimum so narrowing the window takes space from the model
+    /// name, which can be truncated harmlessly, rather than from a verb.
+    static let actionsWidth: CGFloat = ActionButton.width * 2 + 6
+
     /// Read straight out of the reply, in the order it arrived. The daemon ranks
     /// these rows by how far along each model is; re-sorting here would be a
     /// second ranking that could disagree with `bigbro models list`.
@@ -130,7 +137,11 @@ struct ModelPane: View {
             // than hidden.
             TableColumn("") { model in
                 HStack(spacing: 6) {
-                    Button(model.runActionIsStop ? "Stop" : "Start") {
+                    ActionButton(
+                        title: model.runActionIsStop ? "Stop" : "Start",
+                        busy: state.dashboard.isBusy(model.id),
+                        enabled: model.canRunAction
+                    ) {
                         Task {
                             if model.runActionIsStop {
                                 await state.dashboard.stop(model.id)
@@ -139,20 +150,21 @@ struct ModelPane: View {
                             }
                         }
                     }
-                    .disabled(!model.canRunAction)
 
-                    Button(model.weightsActionIsDelete ? "Delete" : "Download") {
+                    ActionButton(
+                        title: model.weightsActionIsDelete ? "Delete" : "Download",
+                        busy: state.dashboard.isBusy(model.id),
+                        enabled: model.canWeightsAction
+                    ) {
                         if model.weightsActionIsDelete {
                             confirmingDelete = model
                         } else {
                             Task { await state.dashboard.download(model.id) }
                         }
                     }
-                    .disabled(!model.canWeightsAction)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
             }
+            .width(min: ModelPane.actionsWidth, ideal: ModelPane.actionsWidth)
         }
         .confirmationDialog(
             "Delete \(confirmingDelete?.name ?? "")?",
@@ -254,8 +266,8 @@ struct SettingsPane: View {
                 // terminal dashboard this app owns the process, so it can offer one.
                 Button("Restart Daemon") { Task { await state.daemon.restart() } }
                     .disabled(!state.daemon.canStop)
-                if state.daemon.isRunning && !state.daemon.stopsOnQuit {
-                    Text("This daemon was started elsewhere. BigBro will leave it running when you quit, but you can stop it here.")
+                if state.daemon.startedElsewhere {
+                    Text("This daemon was started elsewhere. Quitting BigBro will still stop it.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -377,5 +389,51 @@ struct CommandLineToolRow: View {
         } catch {
             problem = "Could not write the shim: \(error.localizedDescription)"
         }
+    }
+}
+
+/// One of the two verbs on a row: fixed width, and a spinner while it is in flight.
+///
+/// The width is fixed rather than fitted for two reasons. A fitted button shrinks
+/// when the window narrows until "Download" becomes "Downl…", and a verb you
+/// cannot read is worse than a column that scrolls. And because these labels swap
+/// as state changes — Start to Stop, Download to Delete — a fitted button would
+/// also resize under the pointer between one render and the next.
+@MainActor
+struct ActionButton: View {
+    /// Sized for "Download", the longest label the model rows produce.
+    static let width: CGFloat = 88
+    /// "Disconnect" is longer still.
+    static let deviceWidth: CGFloat = 96
+
+    let title: String
+    var busy: Bool = false
+    var enabled: Bool = true
+    var width: CGFloat = ActionButton.width
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                // The label stays in the layout while hidden, so the button does
+                // not change size when the spinner replaces it.
+                Text(title)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .opacity(busy ? 0 : 1)
+                if busy {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(0.6)
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .frame(width: width)
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        // Disabled while in flight as well as when the verb does not apply, so a
+        // second press cannot queue a command the first has not answered yet.
+        .disabled(!enabled || busy)
     }
 }
