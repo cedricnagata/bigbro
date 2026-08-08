@@ -284,3 +284,63 @@ async def test_a_load_announces_starting_before_it_finishes(daemon):
 
     release.set()
     await task
+
+
+async def test_stopping_a_speech_model_announces_it(daemon):
+    """The bug this covers: stopping Kokoro left the row spinning.
+
+    The control handler announced state for a language model and returned silently
+    for a speech one, so an attached UI heard nothing — and the spinner it had put
+    up when it sent the command had nothing to clear it but a timeout.
+    """
+    import asyncio
+
+    from bigbro.speech import ModelKind
+
+    queue = daemon.events.subscribe()
+    # Stop only announces a real transition, so it has to be loaded first.
+    daemon.speech._loaded[ModelKind.TTS] = object()
+
+    daemon.speech.stop(ModelKind.TTS)
+
+    event = await asyncio.wait_for(queue.get(), 1)
+    assert event["event"] == "model.state"
+    assert event["model"] == ModelKind.TTS.model.id
+    assert event["state"] == "downloaded" or event["state"] == "not downloaded"
+
+
+async def test_a_stop_that_changes_nothing_announces_nothing(daemon):
+    """Stopping something already stopped is not a transition to report."""
+    from bigbro.speech import ModelKind
+
+    queue = daemon.events.subscribe()
+    daemon.speech.stop(ModelKind.STT)
+    assert queue.empty()
+
+
+async def test_a_speech_load_announces_starting(daemon):
+    """Whoever asks — a control command, or a phone wanting to be spoken to."""
+    import asyncio
+
+    from bigbro.speech import ModelKind
+
+    announced: list[tuple[str, str]] = []
+    daemon.speech.on_state_change = lambda mid: announced.append(
+        (mid, daemon.speech.state_description(ModelKind.TTS))
+    )
+    daemon.speech.is_downloaded = lambda _kind: True
+
+    release = asyncio.Event()
+
+    async def slow_load(_kind):
+        await release.wait()
+        return object()
+
+    daemon.speech._load = slow_load
+
+    task = asyncio.create_task(daemon.speech.run(ModelKind.TTS))
+    await asyncio.sleep(0)
+
+    assert announced == [(ModelKind.TTS.model.id, "starting")]
+    release.set()
+    await task

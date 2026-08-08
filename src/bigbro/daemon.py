@@ -64,6 +64,9 @@ class Daemon:
         self.router.on_peer_change = self._on_peer_change
         self.router.on_model_change = self._publish_model_state
         self.engine.on_state_change = self._publish_model_state
+        # Speech is a second engine with a second lifecycle, and it needs the hook
+        # for the same reason the first one did.
+        self.speech.on_state_change = self._publish_model_state
         self.downloader.on_progress = self._on_download_progress
 
         self._stopping = asyncio.Event()
