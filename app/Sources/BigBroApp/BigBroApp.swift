@@ -83,9 +83,20 @@ struct BigBroApp: App {
         // The daemon is a background service, so the menu bar — not a window — is
         // where it lives day to day. A pairing request has to be answerable
         // without hunting for a window that may be behind everything else.
-        MenuBarExtra("BigBro", systemImage: state.dashboard.isAttached ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash") {
+        MenuBarExtra {
             MenuBarContent(openDashboard: { openWindow(id: "dashboard") })
                 .environment(state)
+        } label: {
+            // The app's own mark rather than an SF Symbol. The asset is marked
+            // template-rendering-intent, so it inverts with the menu bar instead
+            // of staying black on a dark one.
+            //
+            // Dimmed rather than swapped when detached: a menu bar icon that
+            // changes shape reads as a different app, and the state is spelled
+            // out in the first line of the menu anyway.
+            Image("bigbro")
+                .renderingMode(.template)
+                .opacity(state.dashboard.isAttached ? 1 : 0.45)
         }
     }
 }

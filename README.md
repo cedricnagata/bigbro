@@ -92,6 +92,40 @@ and the MLX stack pulls recent `transformers`, `huggingface-hub`, `tokenizers`, 
 `fastapi` and `starlette`, which it will upgrade for every other project sharing that interpreter.
 Use a venv if you go that way; see [Development](#development).
 
+### Working on the app
+
+```sh
+brew install xcodegen        # once
+uv sync --extra dev          # once — gives you .venv/bin/bigbro
+app/Scripts/dev.sh           # generates BigBro.xcodeproj and opens it
+```
+
+Then ⌘R. `BigBro.xcodeproj` is **generated from `app/project.yml` and gitignored** — a `.pbxproj`
+is merge-hostile and unreadable in review, and the spec that produces it is forty lines you can
+actually diff. Editing the project in Xcode's inspector works until the next `xcodegen`, so change
+`project.yml` instead. Re-run `dev.sh` after adding a source file, since a new file only joins the
+project when the spec is re-read.
+
+The scheme sets `BIGBRO_DAEMON_COMMAND` to the project's own venv, so ⌘R can start a daemon
+without a bundled runtime. If you already have one running — `bigbro serve` in a terminal — the
+app finds it, attaches, and leaves it running when you quit; the override is never reached. That
+is the same attach-don't-duplicate behaviour a release build has, so it is worth exercising both
+ways.
+
+Xcode signs development builds with your Apple Development identity and the real entitlements,
+hardened runtime included. That matters beyond convenience: notifications need a genuine signature
+and a stable bundle id, so pairing banners work in development rather than only in a signed
+release — and an entitlement that would break under the hardened runtime breaks here, not during
+notarization.
+
+CI does not use any of this. It builds the package with SwiftPM and assembles the bundle with
+`app/Scripts/make-app.sh`, so nothing in the Xcode project can break a release.
+
+```sh
+swift test --package-path app      # the same 73 tests CI runs
+uv run --extra dev pytest          # and the Python side
+```
+
 ## Usage
 
 Open BigBro. The menu bar item is the day-to-day face of it: serving state at a glance, which

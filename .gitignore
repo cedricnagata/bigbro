@@ -7,3 +7,16 @@ venv/
 build/
 dist/
 *.egg-info/
+
+# Generated from app/project.yml by xcodegen. A .pbxproj is merge-hostile and
+# opaque in review; the spec that produces it is neither.
+*.xcodeproj
+.build/
+DerivedData/
+
+# Per-user editor state, generated on open: VS Code's Swift extension writes
+# launch.json, and Xcode writes scheme management into .swiftpm. Neither
+# describes the project — both describe whoever last opened it.
+.vscode/
+.swiftpm/
+xcuserdata/

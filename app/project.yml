@@ -1,0 +1,83 @@
+# The Xcode project for local development, as a spec rather than a .pbxproj.
+#
+# Generated with `xcodegen generate` from inside `app/`, or by `Scripts/dev.sh`.
+# BigBro.xcodeproj is gitignored on purpose: a .pbxproj is merge-hostile and
+# opaque in review, and this file says the same thing in forty readable lines.
+# Regenerate rather than edit the project in Xcode's inspector — a change made
+# there is lost the next time anyone runs xcodegen.
+#
+# CI does not use this. It builds the package with SwiftPM and assembles the
+# bundle with Scripts/make-app.sh, so nothing here can break a release. This
+# exists for ⌘R, breakpoints, previews, and a signature real enough that
+# notifications work.
+
+name: BigBro
+
+options:
+  bundleIdPrefix: com.cedricnagata
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  groupSortPosition: none
+
+packages:
+  BigBro:
+    # The same package CI builds. BigBroControl is consumed from here rather
+    # than duplicated, so there is one definition of the library and its tests.
+    path: .
+
+targets:
+  BigBro:
+    type: application
+    platform: macOS
+
+    sources:
+      - path: Sources/BigBroApp
+      # The icons the menu bar app had before the port. actool compiles this to
+      # Assets.car; make-app.sh runs the same tool for the SwiftPM path.
+      - path: Resources/Assets.xcassets
+
+    dependencies:
+      - package: BigBro
+        product: BigBroControl
+
+    settings:
+      base:
+        INFOPLIST_FILE: Resources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Resources/BigBro.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        PRODUCT_BUNDLE_IDENTIFIER: com.cedricnagata.bigbro
+        PRODUCT_NAME: BigBro
+        MARKETING_VERSION: "0.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+
+        # Hardened runtime locally too, so the entitlements are exercised in
+        # development rather than first discovered during notarization.
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: MJ3P95GLA4
+
+        SWIFT_VERSION: "5.0"
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        # MLX is Apple silicon only; there is nothing to gain from an x86 slice.
+        ARCHS: arm64
+
+schemes:
+  BigBro:
+    build:
+      targets:
+        BigBro: all
+    run:
+      config: Debug
+      # The daemon is normally found inside the bundle, and there is no bundled
+      # runtime in a development build. This points at the project's own venv so
+      # ⌘R can start one — the same override the app documents for anyone
+      # running against a `uv tool install`ed daemon.
+      #
+      # Harmless when a daemon is already running: the app probes first, attaches
+      # to whatever it finds, and never reaches this.
+      environmentVariables:
+        BIGBRO_DAEMON_COMMAND: $(SRCROOT)/../.venv/bin/bigbro
+    test:
+      config: Debug

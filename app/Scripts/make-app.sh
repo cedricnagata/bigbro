@@ -37,6 +37,10 @@ cp "$APP_ROOT/Resources/Info.plist" "$CONTENTS/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$CONTENTS/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$CONTENTS/Info.plist"
 
+# Xcode expands $(EXECUTABLE_NAME) itself; SwiftPM does not, and it names the
+# binary after the target rather than the product. Nothing launches without this.
+/usr/libexec/PlistBuddy -c "Set :CFBundleExecutable BigBroApp" "$CONTENTS/Info.plist"
+
 printf 'APPL????' > "$CONTENTS/PkgInfo"
 
 if [ -d "$APP_ROOT/Resources/Assets.xcassets" ] && command -v actool >/dev/null 2>&1; then
