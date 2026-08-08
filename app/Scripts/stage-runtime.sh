@@ -45,6 +45,18 @@ if [ ! -x "$PYTHON" ]; then
     exit 1
 fi
 
+# uv stamps its managed interpreters with a PEP 668 EXTERNALLY-MANAGED marker, and
+# pip refuses to install into anything carrying one. The marker guards a *shared*
+# interpreter that a package manager owns; this is a private copy inside our own
+# bundle that exists to be installed into, and once staged uv does not manage it
+# either. Dropping it is more honest than passing --break-system-packages, which
+# would leave the shipped runtime still claiming to be somebody else's.
+#
+# Unanchored on purpose: the marker's path moves with the stdlib version, and at
+# this point the tree is nothing but the freshly staged interpreter, so there is
+# no other EXTERNALLY-MANAGED that could be caught by mistake.
+find "$STAGE" -name EXTERNALLY-MANAGED -delete
+
 echo "==> installing bigbro and the MLX stack"
 # --frozen so this resolves exactly what uv.lock pins. A release that quietly
 # re-resolved would ship something nobody tested.
