@@ -353,3 +353,62 @@ def test_resample_handles_empty_audio():
     from bigbro.speech import resample
 
     assert resample(np.array([], dtype=np.float32), 24000, 16000).size == 0
+
+
+# MARK: - Harmony stop tokens
+
+
+class _FakeTokenizer:
+    """Just the surface `add_eos_token` presents, plus a record of what it got."""
+
+    def __init__(self, known: set[str] | None = None) -> None:
+        self.eos_tokens: set[str] = set()
+        self._known = known if known is not None else {"<|call|>"}
+
+    def add_eos_token(self, token: str) -> None:
+        if token not in self._known:
+            raise ValueError(f"'{token}' is not a token for this tokenizer")
+        self.eos_tokens.add(token)
+
+
+def test_a_harmony_model_stops_on_a_tool_call():
+    """The bug this covers: generation ran straight past `<|call|>`.
+
+    gpt-oss declares only `<|return|>` as its eos token, which ends a turn that
+    produced an answer. A turn that produced a tool call ends with `<|call|>`, and
+    without that in the stop set the model kept going — inventing its own tool
+    results and calling the same tool again until it ran out of tokens.
+    """
+    from bigbro.inference.catalog import resolve
+    from bigbro.inference.engine import MLXEngine
+
+    tokenizer = _FakeTokenizer()
+    MLXEngine._teach_harmony_stop_tokens(resolve("gpt-oss-20b"), (object(), tokenizer))
+
+    assert "<|call|>" in tokenizer.eos_tokens
+
+
+def test_only_harmony_models_learn_it():
+    """`<|call|>` is harmony's marker; other templates do not have one."""
+    from bigbro.inference.catalog import EVERY_MODEL, ReasoningStyle
+    from bigbro.inference.engine import MLXEngine
+
+    other = next(
+        m for m in EVERY_MODEL
+        if m.reasoning is not ReasoningStyle.HARMONY and not m.family.is_speech
+    )
+    tokenizer = _FakeTokenizer()
+    MLXEngine._teach_harmony_stop_tokens(other, (object(), tokenizer))
+
+    assert tokenizer.eos_tokens == set()
+
+
+def test_a_tokenizer_without_the_token_does_not_fail_the_load():
+    """The turn still ends on `<|return|>`; this is worth a warning, not a crash."""
+    from bigbro.inference.catalog import resolve
+    from bigbro.inference.engine import MLXEngine
+
+    tokenizer = _FakeTokenizer(known=set())
+    MLXEngine._teach_harmony_stop_tokens(resolve("gpt-oss-20b"), (object(), tokenizer))
+
+    assert tokenizer.eos_tokens == set()

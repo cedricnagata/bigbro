@@ -228,13 +228,51 @@ class MLXEngine:
         loaded = cls._load_blocking(model)
         return loaded, mlx_thread.active_memory() - before
 
+    #: Harmony's tool-call terminator. A model that has decided to call a tool ends
+    #: the turn with this instead of `<|return|>`.
+    _HARMONY_CALL_TOKEN = "<|call|>"
+
     @staticmethod
     def _load_blocking(model: BigBroModel):
         if model.family is Family.VISION:
             from mlx_vlm import load as vlm_load
             return vlm_load(model.repo)
         from mlx_lm import load as lm_load
-        return lm_load(model.repo)
+        loaded = lm_load(model.repo)
+        MLXEngine._teach_harmony_stop_tokens(model, loaded)
+        return loaded
+
+    @classmethod
+    def _teach_harmony_stop_tokens(cls, model: BigBroModel, loaded) -> None:
+        """Stops a harmony model when it calls a tool, not just when it answers.
+
+        mlx-lm takes its stop tokens from `config.json`, and gpt-oss declares only
+        `eos_token_id: 200002` — `<|return|>`, which ends a turn that produced an
+        *answer*. A turn that produced a tool call ends with `<|call|>` (200012)
+        instead, and nothing tells the sampler that.
+
+        Generation therefore runs straight past the call. The model, having emitted
+        a call and seen no result, writes a plausible-looking result itself, then
+        another call, then another invented result — until it hits mlx-lm's default
+        of 256 tokens. It never reaches a final channel, so the turn yields no
+        answer at all, and the client is handed a pile of duplicate calls whose
+        results it never asked for. What looks like a model failing to stop calling
+        one tool is really a decoder that was never told the turn was over.
+
+        Only for harmony models: `<|call|>` is that template's token, and other
+        families either have no such marker or spell it differently.
+        """
+        if model.reasoning is not ReasoningStyle.HARMONY:
+            return
+        tokenizer = loaded[1] if isinstance(loaded, tuple) and len(loaded) > 1 else None
+        if tokenizer is None or not hasattr(tokenizer, "add_eos_token"):
+            return
+        try:
+            tokenizer.add_eos_token(cls._HARMONY_CALL_TOKEN)
+        except Exception as exc:
+            # A tokenizer without the token is a model that does not need it; the
+            # turn still ends on `<|return|>`. Worth a line, not a failed load.
+            log.warning("could not add %s as a stop token: %s", cls._HARMONY_CALL_TOKEN, exc)
 
     def stop(self, model_id: str) -> None:
         """Unloads a model from memory, keeping the download.
