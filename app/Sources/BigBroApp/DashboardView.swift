@@ -134,7 +134,17 @@ struct PairingSheet: View {
             if let app = request.appName, !app.isEmpty {
                 LabeledContent("App", value: app)
             }
-            LabeledContent("Device", value: request.deviceId)
+            // Monospaced and never wrapped. These run to 58 characters — a UUID
+            // with a bundle identifier after it — and a wrapped identifier is
+            // both ugly and hard to compare against what `bigbro pair list`
+            // prints. Selectable so it can be copied rather than transcribed.
+            LabeledContent("Device") {
+                Text(request.deviceId)
+                    .monospaced()
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
             if !request.requiredModels.isEmpty {
                 LabeledContent("Wants", value: request.requiredModels.joined(separator: ", "))
             }
@@ -152,6 +162,9 @@ struct PairingSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 420)
+        // Wide enough for the device id on one line, and free to grow if a
+        // client ever sends a longer one — a fixed width would just move the
+        // wrapping problem to the next device. Capped so it cannot get silly.
+        .frame(minWidth: 580, maxWidth: 760)
     }
 }
