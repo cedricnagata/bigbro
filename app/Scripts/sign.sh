@@ -52,7 +52,15 @@ find "$APP" -type f \( -perm +111 -o -name '*.dylib' -o -name '*.so' \) -print0 
         if [ "$file" = "$MAIN_EXECUTABLE" ]; then
             continue
         fi
-        if [ "$(file --mime-type -b "$file" 2>/dev/null)" = "application/x-mach-binary" ]; then
+        # First line only. For a universal binary `file` prints a summary line and
+        # then one line per architecture, so comparing the whole output is false
+        # for every fat binary — which is most of what the wheels ship, and
+        # exactly what notarization rejects:
+        #
+        #   application/x-mach-binary
+        #   libportaudio.dylib (for architecture x86_64):  application/x-mach-binary
+        #   libportaudio.dylib (for architecture arm64):   application/x-mach-binary
+        if [ "$(file --mime-type -b "$file" 2>/dev/null | head -1)" = "application/x-mach-binary" ]; then
             printf '%s\0' "$file"
         fi
     done > "$BINARIES"

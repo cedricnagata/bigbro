@@ -23,7 +23,10 @@ while IFS= read -r -d '' file; do
     if [ "$file" = "$MAIN_EXECUTABLE" ]; then
         continue
     fi
-    if [ "$(file --mime-type -b "$file" 2>/dev/null)" != "application/x-mach-binary" ]; then
+    # First line only — see sign.sh. Comparing the whole output skipped every
+    # universal binary, so this walked 360 of 366 and reported "all good" on a
+    # bundle notarization then rejected for six unsigned fat libraries.
+    if [ "$(file --mime-type -b "$file" 2>/dev/null | head -1)" != "application/x-mach-binary" ]; then
         continue
     fi
     checked=$((checked + 1))
