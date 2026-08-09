@@ -16,6 +16,22 @@ private struct CommandLineToolOffer: ViewModifier {
     @State private var isPresented = false
     @State private var problem: String?
 
+    /// A stored constant rather than literals joined with `+` inside `Text`. A long
+    /// concatenation chain is one expression to the type checker, and the release
+    /// runner's compiler gives up on it: "unable to type-check this expression in
+    /// reasonable time". Newer ones manage, which makes it another thing that builds
+    /// locally and fails on CI.
+    private static let explanation = """
+        Adds a `bigbro` command that drives this same daemon — `bigbro status`, \
+        `bigbro pair approve`, `bigbro models list`.
+
+        All terminals installs to /usr/local/bin and asks for your password once. \
+        Just for me uses ~/.local/bin, which needs no password but is not on the \
+        default PATH.
+
+        You can change this later in Settings.
+        """
+
     func body(content: Content) -> some View {
         content
             .task {
@@ -32,12 +48,7 @@ private struct CommandLineToolOffer: ViewModifier {
                 Button("Just for Me") { install(into: .thisUser) }
                 Button("Not Now", role: .cancel) { hasOffered = true }
             } message: {
-                Text("Adds a `bigbro` command that drives this same daemon — "
-                     + "`bigbro status`, `bigbro pair approve`, `bigbro models list`.\n\n"
-                     + "All terminals installs to /usr/local/bin and asks for your password "
-                     + "once. Just for me uses ~/.local/bin, which needs no password but is "
-                     + "not on the default PATH.\n\n"
-                     + "You can change this later in Settings.")
+                Text(Self.explanation)
             }
             .alert("Could not install", isPresented: .constant(problem != nil)) {
                 Button("OK") { problem = nil }

@@ -382,11 +382,22 @@ struct CommandLineToolRow: View {
             Button("Install for All Terminals…") { install(into: .allTerminals) }
             Button("Just for Me") { install(into: .thisUser) }
         }
-        Text("All terminals installs to /usr/local/bin and asks for your password once. "
-             + "Just for me uses ~/.local/bin, which needs no password but is not on the "
-             + "default PATH.")
+        Text(Self.scopeExplanation)
             .font(.caption).foregroundStyle(.secondary)
     }
+
+    /// Stored, not built with `+` inside `Text`. See the note in CommandLineToolOffer:
+    /// a long concatenation chain is one expression the release runner's compiler
+    /// refuses to type-check in reasonable time.
+    private static let scopeExplanation = """
+        All terminals installs to /usr/local/bin and asks for your password once. \
+        Just for me uses ~/.local/bin, which needs no password but is not on the default PATH.
+        """
+
+    private static let notOnPathWarning = """
+        ~/.local/bin is not on your PATH. Add it to your shell profile, or install \
+        for all terminals instead.
+        """
 
     @ViewBuilder private var installed: some View {
         Label("`bigbro` is installed", systemImage: "checkmark.circle")
@@ -401,8 +412,7 @@ struct CommandLineToolRow: View {
             if !userScopeIsOnPath {
                 // Installed but unreachable looks exactly like installed, so say it
                 // rather than letting "command not found" be the hint.
-                Text("~/.local/bin is not on your PATH. Add it to your shell profile, "
-                     + "or install for all terminals instead.")
+                Text(Self.notOnPathWarning)
                     .font(.caption).foregroundStyle(.orange)
                 Button("Install for All Terminals…") { install(into: .allTerminals) }
             }
