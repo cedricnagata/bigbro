@@ -39,6 +39,19 @@ if [ -z "$INSTALLED" ]; then
 fi
 mv "$INSTALLED" "$STAGE"
 
+# uv drops a minor-version alias symlink next to the versioned directory
+# (cpython-3.12-macos-aarch64-none -> cpython-3.12.13-macos-aarch64-none). The
+# find above takes the directory, so the move leaves that link pointing at
+# nothing — inside Contents/Resources, where codesign seals it like any other
+# resource and then cannot verify what it sealed:
+#
+#   build/BigBro.app: No such file or directory
+#
+# Which names the bundle, not the link, so it is worth removing at the source
+# rather than diagnosing again later. Anything else uv left here is not ours
+# either, and would only be dead weight in the DMG.
+find "$(dirname "$STAGE")" -maxdepth 1 -name 'cpython-*' -exec rm -rf {} + 2>/dev/null || true
+
 PYTHON="$STAGE/bin/python3"
 if [ ! -x "$PYTHON" ]; then
     echo "error: no interpreter at $PYTHON" >&2
