@@ -22,19 +22,29 @@ echo "==> finding Mach-O binaries"
 BINARIES="$(mktemp)"
 trap 'rm -f "$BINARIES"' EXIT
 
-find "$APP" -type f -perm +111 -print0 \
+# One pass, not two. Dylibs are commonly not marked executable, so the permission
+# filter alone misses them — but collecting those separately listed anything
+# matching both criteria twice, and duplicates are *not* harmless here: the list is
+# signed in parallel below, so the same file gets two concurrent codesign processes.
+# Each writes its signature by renaming a temp over the original, so they race, and
+# one of them finds the file mid-swap:
+#
+#   libpython3.12.dylib: object file format unrecognized, invalid, or unsuitable
+#   libpython3.12.dylib: No such file or directory
+#
+# codesign is idempotent with --force, which is why this looked safe. Idempotent is
+# not the same as concurrency-safe. Widening the find and testing every candidate
+# for Mach-O magic cannot produce a duplicate, and is what verify-signing.sh walks.
+find "$APP" -type f \( -perm +111 -o -name '*.dylib' -o -name '*.so' \) -print0 \
     | while IFS= read -r -d '' file; do
         if [ "$(file --mime-type -b "$file" 2>/dev/null)" = "application/x-mach-binary" ]; then
             printf '%s\0' "$file"
         fi
     done > "$BINARIES"
 
-# Dylibs are commonly not marked executable, so the permission filter above misses
-# them. Catch them by extension as well; duplicates are harmless, codesign is
-# idempotent with --force.
-find "$APP" -type f \( -name '*.dylib' -o -name '*.so' \) -print0 >> "$BINARIES"
-
-count="$(tr -d '\0' < "$BINARIES" | wc -l | tr -d ' ')"
+# Count the NUL separators. `tr -d '\0' | wc -l` counted newlines in a stream that
+# has none by construction, so this always reported 0.
+count="$(tr -cd '\0' < "$BINARIES" | wc -c | tr -d ' ')"
 echo "==> signing nested code"
 
 # -P 8: serially this is a minute and a half of process spawns for no reason.
