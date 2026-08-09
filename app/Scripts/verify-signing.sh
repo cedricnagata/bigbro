@@ -13,7 +13,16 @@ APP="${1:?usage: verify-signing.sh <app-bundle>}"
 failures=0
 checked=0
 
+# Same exclusion as sign.sh, for the same reason: handed a bundle's main
+# executable, codesign resolves the enclosing bundle and reports on *that*. Left
+# in, a broken bundle seal shows up here as "unsigned or invalid:
+# Contents/MacOS/<exe>", which points at the one file that is not the problem.
+MAIN_EXECUTABLE="$APP/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")"
+
 while IFS= read -r -d '' file; do
+    if [ "$file" = "$MAIN_EXECUTABLE" ]; then
+        continue
+    fi
     if [ "$(file --mime-type -b "$file" 2>/dev/null)" != "application/x-mach-binary" ]; then
         continue
     fi
@@ -26,8 +35,30 @@ done < <(find "$APP" -type f \( -perm +111 -o -name '*.dylib' -o -name '*.so' \)
 
 echo "==> checked $checked nested binaries"
 
-echo "==> verifying the bundle itself"
-codesign --verify --deep --strict --verbose=2 "$APP"
+# A sealed resource that isn't on disk verifies as "No such file or directory",
+# naming the bundle rather than the file it went looking for — so list the
+# candidates before asking, or the error says nothing actionable.
+echo "==> checking for symlinks with no target"
+dangling="$(find "$APP" -type l ! -exec test -e {} \; -print 2>/dev/null || true)"
+if [ -n "$dangling" ]; then
+    printf '%s\n' "$dangling" | sed "s|^$APP/||" | head -20
+    echo "==> $(printf '%s\n' "$dangling" | wc -l | tr -d ' ') dangling symlink(s)"
+else
+    echo "==> none"
+fi
+
+# Split deliberately. The shallow pass checks the bundle's own seal; the deep pass
+# also walks every nested item. Which one fails says where to look, and running
+# only the deep one — as this did — conflates the two.
+echo "==> verifying the bundle's own seal"
+shallow=0
+codesign --verify --strict --verbose=4 "$APP" || shallow=$?
+echo "==> shallow verify exit=$shallow"
+
+echo "==> verifying nested code too"
+deep=0
+codesign --verify --deep --strict --verbose=4 "$APP" || deep=$?
+echo "==> deep verify exit=$deep"
 
 # The question notarization actually asks. `spctl` reports rejection here for an
 # un-notarized build, which is expected before submission — so it is reported,
@@ -38,6 +69,13 @@ fi
 
 if [ "$failures" -gt 0 ]; then
     echo "error: $failures binaries would fail notarization" >&2
+    exit 1
+fi
+# Checked after the per-file summary on purpose. These used to run under `set -e`,
+# so a failing bundle verify killed the script before it could report how many
+# nested binaries were bad — losing the more useful number of the two.
+if [ "$shallow" -ne 0 ] || [ "$deep" -ne 0 ]; then
+    echo "error: bundle verification failed (shallow=$shallow deep=$deep)" >&2
     exit 1
 fi
 echo "==> all good"
