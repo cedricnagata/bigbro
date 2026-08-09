@@ -162,9 +162,14 @@ public enum CommandLineTool {
         at destination: URL? = nil,
         interpreter: String? = bundledInterpreter(),
         fileManager: FileManager = .default,
-        authorize: @MainActor (String) throws -> Void = runWithAdministratorPrivileges
+        // Defaulted to nil and resolved in the body rather than defaulted to
+        // `runWithAdministratorPrivileges` directly: a default argument is evaluated
+        // outside the function's isolation before Swift 6, so naming a main-actor
+        // method there builds here and fails on the release runner's 5.10.
+        authorize: (@MainActor (String) throws -> Void)? = nil
     ) throws -> URL {
         guard let interpreter else { throw Failure.noBundledRuntime }
+        let authorize = authorize ?? runWithAdministratorPrivileges
         let target = destination ?? scope.destination
         guard scope.needsAuthorization else {
             return try install(at: target, interpreter: interpreter, fileManager: fileManager)

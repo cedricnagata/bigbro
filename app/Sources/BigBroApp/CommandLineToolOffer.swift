@@ -10,6 +10,7 @@ import SwiftUI
 /// Asked once and never again, whatever the answer. Someone who declines can still
 /// install from Settings, and a prompt that returns every launch to re-ask a
 /// question already answered is worse than not asking.
+@MainActor
 private struct CommandLineToolOffer: ViewModifier {
     @AppStorage("hasOfferedCommandLineTool") private var hasOffered = false
     @State private var isPresented = false
@@ -60,5 +61,9 @@ private struct CommandLineToolOffer: ViewModifier {
 }
 
 extension View {
+    // Isolated because the modifier is: its `@AppStorage` and `@State` defaults make
+    // the memberwise init main-actor-isolated, and constructing it from a nonisolated
+    // context is exactly the kind of thing that builds on one compiler and not another.
+    @MainActor
     func commandLineToolOffer() -> some View { modifier(CommandLineToolOffer()) }
 }
