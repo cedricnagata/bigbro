@@ -105,11 +105,30 @@ jobs:
         run: |
           echo "${{ secrets.APPLE_API_KEY_P8 }}" > /tmp/api-key.p8
           ditto -c -k --keepParent build/BigBro.app /tmp/BigBro.zip
-          xcrun notarytool submit /tmp/BigBro.zip \
-            --key /tmp/api-key.p8 \
-            --key-id "${{ secrets.APPLE_API_KEY_ID }}" \
-            --issuer "${{ secrets.APPLE_API_ISSUER_ID }}" \
-            --wait
+
+          # Submit and wait as separate calls so the submission id outlives a
+          # rejection. `submit --wait` prints "status: Invalid" and exits non-zero
+          # without naming the binary Apple objected to — that is only in the log,
+          # and the log needs the id, which the combined form has already thrown
+          # away by the time you want it.
+          AUTH=(--key /tmp/api-key.p8
+                --key-id "${{ secrets.APPLE_API_KEY_ID }}"
+                --issuer "${{ secrets.APPLE_API_ISSUER_ID }}")
+
+          SUBMISSION="$(xcrun notarytool submit /tmp/BigBro.zip "${AUTH[@]}" \
+            --output-format json \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+          echo "submission: $SUBMISSION"
+
+          status=0
+          xcrun notarytool wait "$SUBMISSION" "${AUTH[@]}" || status=$?
+
+          # Printed either way: a successful notarization can still carry warnings
+          # worth seeing, and on failure this is the whole point.
+          echo "==> notary log"
+          xcrun notarytool log "$SUBMISSION" "${AUTH[@]}" || true
+
+          [ "$status" -eq 0 ] || exit "$status"
           # Stapling the app as well as the DMG: a user who copies to
           # /Applications and goes offline before first launch would otherwise
           # leave Gatekeeper with no ticket to find.
