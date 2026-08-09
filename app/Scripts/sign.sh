@@ -35,8 +35,23 @@ trap 'rm -f "$BINARIES"' EXIT
 # codesign is idempotent with --force, which is why this looked safe. Idempotent is
 # not the same as concurrency-safe. Widening the find and testing every candidate
 # for Mach-O magic cannot produce a duplicate, and is what verify-signing.sh walks.
+# The bundle's main executable is deliberately excluded. Pointed at it, codesign
+# resolves the enclosing bundle and seals *that* — writing Contents/_CodeSignature
+# over every resource in the app — rather than signing the one file it was given.
+# Inside `xargs -P 8` that is one worker walking and sealing 1.3 GB of Resources
+# while the other seven are still rewriting files in it, so it reads one that has
+# been renamed out from under it:
+#
+#   build/BigBro.app/Contents/MacOS/BigBroApp: No such file or directory
+#
+# It is signed by the bundle step below, which is the only correct way to sign it.
+MAIN_EXECUTABLE="$APP/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")"
+
 find "$APP" -type f \( -perm +111 -o -name '*.dylib' -o -name '*.so' \) -print0 \
     | while IFS= read -r -d '' file; do
+        if [ "$file" = "$MAIN_EXECUTABLE" ]; then
+            continue
+        fi
         if [ "$(file --mime-type -b "$file" 2>/dev/null)" = "application/x-mach-binary" ]; then
             printf '%s\0' "$file"
         fi
