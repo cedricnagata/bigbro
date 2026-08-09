@@ -5,17 +5,48 @@ import Foundation
 /// Someone who installed from the DMG has a complete Python and a complete MLX
 /// stack on disk already; asking them to `uv tool install` a second copy to get
 /// `bigbro pair approve` would be absurd. This writes a three-line shim instead.
-///
-/// `~/.local/bin` rather than `/usr/local/bin`: the latter is root-owned, does
-/// not exist on a clean install, and creating it needs either a privileged helper
-/// or an installer package — an entire extra signing and lifecycle surface for
-/// what is ultimately a convenience symlink. `~/.local/bin` needs no
-/// authorisation and is already on PATH for anyone using uv or pipx.
 public enum CommandLineTool {
-    public static var destination: URL {
-        URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".local/bin/bigbro")
+
+    /// Where the shim goes — which is really a question about PATH, and about what
+    /// it costs to get on it.
+    ///
+    /// The distinction exists because `~/.local/bin` alone was not enough. It is on
+    /// PATH for anyone using uv or pipx and on nobody else's, and the DMG exists
+    /// precisely for people who have neither — so the convenience install landed as
+    /// `command not found` for exactly the audience it was for.
+    public enum Scope: Sendable, CaseIterable, Equatable {
+        /// `/usr/local/bin`, the first line of `/etc/paths`. Every shell searches it
+        /// without anyone editing a profile, which is why Docker and VS Code both put
+        /// their CLIs here. Root-owned, so it costs one authorization.
+        case allTerminals
+        /// `~/.local/bin`. Needs no authorization and touches nothing shared, but is
+        /// not on the default macOS PATH — see ``isOnPath(scope:pathProvider:)``.
+        case thisUser
+
+        public var directory: URL {
+            switch self {
+            case .allTerminals:
+                return URL(fileURLWithPath: "/usr/local/bin")
+            case .thisUser:
+                return URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".local/bin")
+            }
+        }
+
+        public var destination: URL { directory.appendingPathComponent("bigbro") }
+
+        /// Whether installing here will raise a password prompt.
+        public var needsAuthorization: Bool { self == .allTerminals }
+
+        /// True when the shell is guaranteed to search here with no further setup.
+        ///
+        /// `/usr/local/bin` is in `/etc/paths` on every macOS install, so this is a
+        /// fact about the platform rather than about the user — which is the point of
+        /// preferring it. Nothing to detect, nothing to warn about, no profile to edit.
+        public var isAlwaysOnPath: Bool { self == .allTerminals }
     }
+
+    /// Kept for callers that just want the no-authorization location.
+    public static var destination: URL { Scope.thisUser.destination }
 
     public enum Status: Equatable, Sendable {
         case notInstalled
@@ -23,6 +54,25 @@ public enum CommandLineTool {
         case current
         /// Installed, but pointing somewhere else — usually an app that moved.
         case stale(pointingAt: String)
+    }
+
+    public enum Failure: LocalizedError, Equatable {
+        /// A `swift run` build with no Python staged inside it.
+        case noBundledRuntime
+        /// The user dismissed the password prompt. Not an error to report loudly.
+        case cancelled
+        case authorizationFailed(String)
+
+        public var errorDescription: String? {
+            switch self {
+            case .noBundledRuntime:
+                return "This build has no bundled runtime, so there is nothing to point a shim at."
+            case .cancelled:
+                return "Installation was cancelled."
+            case .authorizationFailed(let detail):
+                return "Could not install into /usr/local/bin: \(detail)"
+            }
+        }
     }
 
     /// The shim, generated from wherever the app actually is.
@@ -68,15 +118,29 @@ public enum CommandLineTool {
         return .current
     }
 
+    public static func status(
+        for scope: Scope,
+        interpreter: String? = bundledInterpreter(),
+        fileManager: FileManager = .default
+    ) -> Status {
+        status(at: scope.destination, interpreter: interpreter, fileManager: fileManager)
+    }
+
+    /// True when `bigbro` resolves to this app from any scope. What the first-run
+    /// offer is gated on: having installed it once, in either place, is enough.
+    public static func isInstalled(interpreter: String? = bundledInterpreter()) -> Bool {
+        Scope.allCases.contains { status(for: $0, interpreter: interpreter) == .current }
+    }
+
+    // MARK: - Installing
+
     @discardableResult
     public static func install(
         at destination: URL = CommandLineTool.destination,
         interpreter: String? = bundledInterpreter(),
         fileManager: FileManager = .default
     ) throws -> URL {
-        guard let interpreter else {
-            throw CocoaError(.fileNoSuchFile)
-        }
+        guard let interpreter else { throw Failure.noBundledRuntime }
         try fileManager.createDirectory(
             at: destination.deletingLastPathComponent(), withIntermediateDirectories: true
         )
@@ -85,14 +149,136 @@ public enum CommandLineTool {
         return destination
     }
 
-    /// Whether `~/.local/bin` is somewhere the user's shell will actually look.
+    /// Installs into `scope`, raising a password prompt only where one is needed.
     ///
-    /// Installing a shim into a directory that is not on PATH looks like success
-    /// and behaves like failure, so the UI needs to be able to say so.
+    /// The privileged half is deliberately as small as it can be: the shim is written
+    /// to a temporary file with no special rights, and the authorized command only
+    /// moves it into place. One authorization, three fixed commands, nothing about
+    /// the app's contents decided while running as root.
+    @discardableResult
+    @MainActor
+    public static func install(
+        into scope: Scope,
+        at destination: URL? = nil,
+        interpreter: String? = bundledInterpreter(),
+        fileManager: FileManager = .default,
+        authorize: @MainActor (String) throws -> Void = runWithAdministratorPrivileges
+    ) throws -> URL {
+        guard let interpreter else { throw Failure.noBundledRuntime }
+        let target = destination ?? scope.destination
+        guard scope.needsAuthorization else {
+            return try install(at: target, interpreter: interpreter, fileManager: fileManager)
+        }
+
+        let staged = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("bigbro-shim-\(UUID().uuidString.prefix(8))")
+        try script(forInterpreter: interpreter).write(to: staged, atomically: true, encoding: .utf8)
+        defer { try? fileManager.removeItem(at: staged) }
+
+        // /usr/local/bin is absent on a clean Apple silicon machine — Homebrew lives
+        // in /opt/homebrew there — so this creates it rather than assuming it.
+        let command = [
+            "/bin/mkdir -p \(shellQuoted(target.deletingLastPathComponent().path))",
+            "/bin/cp \(shellQuoted(staged.path)) \(shellQuoted(target.path))",
+            "/bin/chmod 755 \(shellQuoted(target.path))",
+        ].joined(separator: " && ")
+
+        try authorize(command)
+        return target
+    }
+
+    /// Runs one shell command as root, prompting once.
+    ///
+    /// AppleScript rather than a `SMAppService` helper on purpose. A privileged helper
+    /// is the rigorous answer and brings a bundled tool, a launchd plist, matching
+    /// signing requirements and an update story with it — a lot of lifecycle for what
+    /// is ultimately copying one file into a directory on PATH.
+    @MainActor
+    public static func runWithAdministratorPrivileges(_ command: String) throws {
+        let source = "do shell script \"\(appleScriptQuoted(command))\" with administrator privileges"
+        guard let script = NSAppleScript(source: source) else {
+            throw Failure.authorizationFailed("could not build the authorization script")
+        }
+
+        var errorInfo: NSDictionary?
+        script.executeAndReturnError(&errorInfo)
+        guard let errorInfo else { return }
+
+        // -128 is userCancelledErr: they hit Cancel on the password prompt, which is
+        // an answer rather than a fault, and must not come back as a red error.
+        let code = (errorInfo[NSAppleScript.errorNumber] as? Int) ?? 0
+        if code == -128 { throw Failure.cancelled }
+        let message = (errorInfo[NSAppleScript.errorMessage] as? String) ?? "error \(code)"
+        throw Failure.authorizationFailed(message)
+    }
+
+    // MARK: - PATH
+
+    /// Whether a shell started by the user would actually find the shim.
+    ///
+    /// Reads the **login shell's** PATH, not this process's. A GUI app is launched by
+    /// launchd and never sources `~/.zshrc`, so the app's own `PATH` says nothing
+    /// about what a terminal will search — it reports `~/.local/bin` missing for
+    /// someone who has had it on PATH for years. Asking the login shell is the only
+    /// answer that matches what the user will see.
+    public static func isOnPath(
+        scope: Scope,
+        pathProvider: () -> String? = { loginShellPath() }
+    ) -> Bool {
+        if scope.isAlwaysOnPath { return true }
+        let directory = scope.directory.path
+        guard let path = pathProvider() else { return false }
+        return path.split(separator: ":").contains { $0 == directory }
+    }
+
+    /// The PATH a new interactive terminal would have.
+    ///
+    /// `-l -c` so the profile that sets PATH is actually read; anything else measures
+    /// launchd's environment with extra steps.
+    public static func loginShellPath(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String? {
+        let shell = environment["SHELL"] ?? "/bin/zsh"
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: shell)
+        process.arguments = ["-l", "-c", "printf %s \"$PATH\""]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+        } catch {
+            // A shell that will not start tells us nothing; fall back to this
+            // process's own PATH rather than claiming the directory is missing.
+            return environment["PATH"]
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (output?.isEmpty == false) ? output : environment["PATH"]
+    }
+
+    /// Retained so existing callers keep compiling. Prefer ``isOnPath(scope:pathProvider:)``,
+    /// which asks the login shell rather than this process.
     public static func destinationIsOnPath(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> Bool {
-        let directory = destination.deletingLastPathComponent().path
+        let directory = Scope.thisUser.directory.path
         return (environment["PATH"] ?? "").split(separator: ":").contains { $0 == directory }
+    }
+
+    // MARK: - Quoting
+
+    /// Single-quoted for `/bin/sh`, so a path with a space or a `$` in it survives.
+    static func shellQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// Escaped for the inside of an AppleScript string literal.
+    static func appleScriptQuoted(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
     }
 }

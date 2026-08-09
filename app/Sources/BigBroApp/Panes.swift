@@ -344,51 +344,98 @@ struct LogPane: View {
 /// `bigbro pair approve` would be silly.
 @MainActor
 struct CommandLineToolRow: View {
-    @State private var status = CommandLineTool.status()
+    @State private var statuses: [CommandLineTool.Scope: CommandLineTool.Status] = [:]
+    @State private var userScopeIsOnPath = true
     @State private var problem: String?
 
+    private var allTerminals: CommandLineTool.Status { statuses[.allTerminals] ?? .notInstalled }
+    private var thisUser: CommandLineTool.Status { statuses[.thisUser] ?? .notInstalled }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            switch status {
-            case .notInstalled:
-                Button("Install Command Line Tool") { install() }
-                Text("Adds `bigbro` to ~/.local/bin, so the CLI drives this same daemon.")
-                    .font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            if allTerminals == .current || thisUser == .current {
+                installed
+            } else {
+                offer
+            }
 
-            case .current:
-                Label("`bigbro` is installed", systemImage: "checkmark.circle")
-                    .foregroundStyle(.green)
-                if !CommandLineTool.destinationIsOnPath() {
-                    // Installed but unreachable looks exactly like installed, so
-                    // say it rather than letting "command not found" be the hint.
-                    Text("~/.local/bin is not on your PATH — add it to your shell profile.")
-                        .font(.caption).foregroundStyle(.orange)
-                }
-
-            case .stale(let pointingAt):
-                Button("Repair Command Line Tool") { install() }
-                Text("The installed `bigbro` points somewhere else (\(pointingAt)). BigBro was probably moved.")
-                    .font(.caption).foregroundStyle(.secondary)
+            if case .stale(let pointingAt) = allTerminals {
+                repair(.allTerminals, pointingAt: pointingAt)
+            }
+            if case .stale(let pointingAt) = thisUser {
+                repair(.thisUser, pointingAt: pointingAt)
             }
 
             if let problem {
                 Text(problem).font(.caption).foregroundStyle(.red)
             }
         }
+        .task { await refresh() }
     }
 
-    private func install() {
+    /// Both offered, with the difference stated as what it costs rather than as a
+    /// path — "requires your password" is the part of the choice a user can weigh.
+    @ViewBuilder private var offer: some View {
+        Text("Adds `bigbro` to your shell, driving this same daemon.")
+            .font(.caption).foregroundStyle(.secondary)
+        HStack {
+            Button("Install for All Terminals…") { install(into: .allTerminals) }
+            Button("Just for Me") { install(into: .thisUser) }
+        }
+        Text("All terminals installs to /usr/local/bin and asks for your password once. "
+             + "Just for me uses ~/.local/bin, which needs no password but is not on the "
+             + "default PATH.")
+            .font(.caption).foregroundStyle(.secondary)
+    }
+
+    @ViewBuilder private var installed: some View {
+        Label("`bigbro` is installed", systemImage: "checkmark.circle")
+            .foregroundStyle(.green)
+
+        if allTerminals == .current {
+            Text("/usr/local/bin/bigbro — on PATH in every shell.")
+                .font(.caption).foregroundStyle(.secondary)
+        } else {
+            Text("~/.local/bin/bigbro")
+                .font(.caption).foregroundStyle(.secondary)
+            if !userScopeIsOnPath {
+                // Installed but unreachable looks exactly like installed, so say it
+                // rather than letting "command not found" be the hint.
+                Text("~/.local/bin is not on your PATH. Add it to your shell profile, "
+                     + "or install for all terminals instead.")
+                    .font(.caption).foregroundStyle(.orange)
+                Button("Install for All Terminals…") { install(into: .allTerminals) }
+            }
+        }
+    }
+
+    @ViewBuilder private func repair(_ scope: CommandLineTool.Scope, pointingAt: String) -> some View {
+        Button("Repair \(scope == .allTerminals ? "/usr/local/bin" : "~/.local/bin")") {
+            install(into: scope)
+        }
+        Text("That `bigbro` points somewhere else (\(pointingAt)). BigBro was probably moved.")
+            .font(.caption).foregroundStyle(.secondary)
+    }
+
+    private func install(into scope: CommandLineTool.Scope) {
         problem = nil
-        guard CommandLineTool.bundledInterpreter() != nil else {
-            problem = "This build has no bundled runtime, so there is nothing to point a shim at."
-            return
-        }
         do {
-            try CommandLineTool.install()
-            status = CommandLineTool.status()
+            try CommandLineTool.install(into: scope)
+        } catch CommandLineTool.Failure.cancelled {
+            // They said no. Not a failure to report in red.
         } catch {
-            problem = "Could not write the shim: \(error.localizedDescription)"
+            problem = error.localizedDescription
         }
+        Task { await refresh() }
+    }
+
+    /// The PATH probe starts a login shell, so it stays off the main actor.
+    private func refresh() async {
+        let scopes = CommandLineTool.Scope.allCases
+        statuses = Dictionary(uniqueKeysWithValues: scopes.map { ($0, CommandLineTool.status(for: $0)) })
+        userScopeIsOnPath = await Task.detached {
+            CommandLineTool.isOnPath(scope: .thisUser)
+        }.value
     }
 }
 

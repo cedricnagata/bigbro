@@ -74,6 +74,7 @@ struct BigBroApp: App {
                 .environment(state)
                 .frame(minWidth: 820, minHeight: 480)
                 .task { await state.begin() }
+                .commandLineToolOffer()
         }
         .defaultSize(width: 940, height: 600)
         .commands {
