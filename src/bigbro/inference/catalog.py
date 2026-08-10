@@ -133,6 +133,37 @@ LANGUAGE_MODELS: tuple[BigBroModel, ...] = (
         approximate_gb=12,
         repo="mlx-community/gpt-oss-20b-MXFP4-Q8",
     ),
+    # The two Qwen3.5-architecture entries below are `…ForConditionalGeneration`
+    # checkpoints and ship a vision tower, but they are LANGUAGE deliberately.
+    # mlx-lm handles both `qwen3_5` and `qwen3_5_moe`, and its `sanitize` drops the
+    # vision weights on load — so they run text-only, which is the half that keeps
+    # tools and `enable_thinking`. The vision path takes neither: `_generate_vision`
+    # templates through mlx-vlm, which has no tools slot and no template context, so
+    # filing these under VISION would silently cost them both.
+    BigBroModel(
+        id="qwen3.6-35b-a3b",
+        display_name="Qwen3.6 35B A3B",
+        family=Family.LANGUAGE,
+        # Same `<think>` framing and same `enable_thinking` switch as Qwen3 proper.
+        reasoning=ReasoningStyle.THINK_TAGS_TOGGLABLE,
+        supports_tools=True,
+        # A3B: 35B of weights, ~3B active per token, so it generates far faster than
+        # its size suggests — but all 35B are resident, and 20 GB is the figure that
+        # decides whether it fits alongside anything else.
+        approximate_gb=20.4,
+        repo="mlx-community/Qwen3.6-35B-A3B-4bit",
+    ),
+    BigBroModel(
+        id="bonsai-27b-ternary",
+        display_name="Bonsai 27B Ternary",
+        family=Family.LANGUAGE,
+        reasoning=ReasoningStyle.THINK_TAGS_TOGGLABLE,
+        supports_tools=True,
+        approximate_gb=8.5,
+        # The only MLX build of the ternary weights, and it comes from the model's own
+        # authors rather than mlx-community — the one repo here that does.
+        repo="prism-ml/Ternary-Bonsai-27B-mlx-2bit",
+    ),
     BigBroModel(
         id="qwen3-8b",
         display_name="Qwen3 8B",

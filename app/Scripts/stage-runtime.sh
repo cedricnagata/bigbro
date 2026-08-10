@@ -86,6 +86,26 @@ echo "==> verifying the bundled runtime can actually import bigbro"
 
 "$HERE/trim-runtime.sh" "$STAGE"
 
+echo "==> verifying the trimmed runtime can still reach the inference stack"
+# After the trim, not before, and importing more than `--help` does.
+#
+# The trim deletes directories by name from inside third-party wheels, which is a
+# guess about what those names mean, and a wrong guess produces a runtime that
+# starts, serves, pairs, and fails only once a real request needs a tokenizer. A
+# `--help` before the trim cannot see any of that: it exercises argparse.
+#
+# These four are the imports the daemon does lazily on the first request of each
+# kind, so a break in any of them is invisible until a user hits it. They cost a
+# few seconds here and turn a shipped-and-broken release into a failed build.
+"$PYTHON" - <<'PY'
+from transformers import AutoTokenizer   # torch's whole import chain hangs off this
+import mlx_lm, mlx_vlm                   # language and vision generation
+import mlx_audio                         # Kokoro / Parakeet
+from misaki import en                    # Kokoro's G2P, which needs the spaCy model
+en.G2P()
+print("   inference stack imports clean")
+PY
+
 echo "==> precompiling"
 # unchecked-hash is the point of this step, not -O.
 #

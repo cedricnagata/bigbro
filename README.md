@@ -258,6 +258,8 @@ silently served by a different one.
 | Model | Tools | Reasoning | Size |
 |---|---|---|---|
 | gpt-oss 20B | ✓ | low / medium / high | ~12 GB |
+| Qwen3.6 35B A3B | ✓ | on / off | ~20 GB |
+| Bonsai 27B Ternary | ✓ | on / off | ~8.5 GB |
 | Qwen3 8B / 4B | ✓ | on / off | ~4.7 / 2.4 GB |
 | Llama 3.1 8B, 3.2 3B, 3.2 1B | ✓ | — | ~4.5 / 1.8 / 0.7 GB |
 | Gemma 4 E4B / E2B, Gemma 3 1B | — | — | ~4.4 / 3.0 / 0.8 GB |
@@ -265,6 +267,15 @@ silently served by a different one.
 | DeepSeek-R1 Distill 7B | — | always | ~4.2 GB |
 | Qwen2.5-VL 3B, Qwen3-VL 4B (vision) | — | — | ~2.0 / 2.5 GB |
 | Gemma 3 4B, Gemma 4 E2B (vision) | — | — | ~3.0 GB |
+
+Qwen3.6 35B A3B and Bonsai 27B Ternary are both Qwen3.5-architecture
+`…ForConditionalGeneration` checkpoints and ship a vision tower, but they are catalogued as
+language models on purpose: mlx-lm loads the text half and drops the vision weights, which is
+what keeps their tools slot and `enable_thinking` — the vision path templates through mlx-vlm,
+which offers neither. 35B A3B is a mixture of experts, so only ~3B parameters are active per
+token and it generates far faster than its size suggests, but all 35B stay resident. Bonsai's
+ternary weights come from the model's authors rather than mlx-community, the one catalog entry
+that does.
 
 Models differ in what they support, and BigBro adapts rather than refusing — see
 [Capability mismatches](#capability-mismatches). Requests carrying images must name a vision model,
