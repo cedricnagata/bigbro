@@ -28,7 +28,21 @@ fi
 before="$(du -sm "$ROOT" | cut -f1)"
 
 # Test suites shipped inside wheels. Never imported in anger.
-find "$SITE" -type d \( -name tests -o -name test -o -name testing \) -prune -exec rm -rf {} + 2>/dev/null || true
+#
+# `tests` and `test` only — NOT `testing`, which shipped here once and broke every
+# release it went out in. `torch/testing`, `numpy/testing` and `sympy/testing` are
+# public API, not test suites, and torch imports its own on the way up:
+# `torch/autograd/gradcheck.py` does `import torch.testing` at module scope. Delete
+# it and `import torch` fails, which transformers catches and re-raises against
+# whatever was being built at the time:
+#
+#   ModuleNotFoundError: Could not import module 'AutoTokenizer'.
+#                        Are this object's requirements defined correctly?
+#
+# — a message that names neither torch nor this script, and reaches the user as a
+# failed inference call on an iPhone. The convention that a directory called
+# `tests` is disposable does not extend to `testing`.
+find "$SITE" -type d \( -name tests -o -name test \) -prune -exec rm -rf {} + 2>/dev/null || true
 
 # C++ headers for building against torch, which nothing here does.
 rm -rf "$SITE/torch/include" "$SITE/torch/utils/tensorboard" 2>/dev/null || true
